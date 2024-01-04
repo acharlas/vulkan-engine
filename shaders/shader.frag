@@ -131,12 +131,12 @@ void main(  )
 
 	vec2 q = gl_FragCoord.xy/iResolution.xy;
     vec2 p = (gl_FragCoord.xy - 0.5*iResolution.xy)/iResolution.y;
-    bsMo = (iMouse.xy - 0.5*iResolution.xy)/iResolution.y;
+    bsMo = vec2(0);//(iMouse.xy - 0.5*iResolution.xy)/iResolution.y;
     
     float time = iTime*3.;
     vec3 ro = vec3(0,0,time);
     
-    ro += vec3(sin(iTime)*0.5,sin(iTime*1.)*0.,0);
+    ro += vec3(sin(iTime)*0.5,sin(iTime*1.)*1.,0);
         
     float dspAmp = .85;
     ro.xy += disp(ro.z)*dspAmp;
@@ -149,13 +149,13 @@ void main(  )
     rightdir = normalize(cross(updir, target));
 	vec3 rd=normalize((p.x*rightdir + p.y*updir)*1. - target);
     rd.xy *= rot(-disp(time + 3.5).x*0.2 + bsMo.x);
-    prm1 = smoothstep(-0.4, 0.4,sin(iTime*0.3));
+    prm1 = smoothstep(-0.4, 0.4,sin(iTime*.3));
 	vec4 scn = render(ro, rd, time);
 		
     vec3 col = scn.rgb;
     col = iLerp(col.bgr, col.rgb, clamp(1.-prm1,0.05,1.));
     
-    col = pow(col, vec3(.55,0.65,0.6))*vec3(1.,.97,.9);
+    col = pow(col, vec3(.55,0.90,0.6))*vec3(1.,.97,.9);
 
     col *= pow( 16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y), 0.12)*0.7+0.3; //Vign
     

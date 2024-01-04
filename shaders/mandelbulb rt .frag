@@ -1,11 +1,11 @@
 #version 450
 #extension GL_ARB_separate_shader_objects : enable
 
-
 layout(location = 0) out vec4 outColor;
 
 layout(push_constant) uniform FSConst {
     vec2 resolution;
+    vec2 mouse;
     float time;
 } u_input;
 
@@ -14,7 +14,7 @@ layout(push_constant) uniform FSConst {
 
 
 // whether turn on the animation
-//#define phase_shift_on 
+#define phase_shift_on 
 
 float stime, ctime;
  void ry(inout vec3 p, float a){  
@@ -152,6 +152,7 @@ vec3 intersect( in vec3 ro, in vec3 rd )
  { 
     vec2 q= gl_FragCoord.xy/u_input.resolution.xy; 
  	vec2 uv = -1.0 + 2.0*q; 
+    vec2 uv.y = -uv.y;
  	uv.x*=u_input.resolution.x/u_input.resolution.y; 
      
     pixel_size = 1.0/(u_input.resolution.x * 3.0);
