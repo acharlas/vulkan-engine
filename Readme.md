@@ -1,3 +1,5 @@
+![](https://github.com/RT/showcase.gif)
+
 # Vulkan Engine Project
 
 This project is a basic implementation of a rendering engine using Vulkan and GLFW. It walks through setting up a Vulkan environment from initializing a window to rendering a simple scene.
