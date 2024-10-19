@@ -962,11 +962,6 @@ private:
 
     bool isDeviceSuitable(VkPhysicalDevice device)
     {
-        /*
-        Need this to check if the device is discrete or not
-            deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
-        Better way is to give a score to each device and keep the best one
-        */
         VkPhysicalDeviceProperties deviceProperties;
         vkGetPhysicalDeviceProperties(device, &deviceProperties);
 
@@ -981,7 +976,12 @@ private:
             swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
         }
 
-        return indices.isComplete() && extensionsSupported && swapChainAdequate && deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        /*
+        Need this to check if the device is discrete or not
+            deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+        Better way is to give a score to each device and keep the best one
+        */
+        return indices.isComplete() && extensionsSupported && swapChainAdequate // && deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
     }
 
     bool checkDeviceExtensionSupport(VkPhysicalDevice device)
