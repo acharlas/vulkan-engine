@@ -542,8 +542,8 @@ private:
 
     void createGraphicsPipeline()
     {
-        auto vertShaderCode = readFile("shaders/vert.spv");
-        auto fragShaderCode = readFile("shaders/frag.spv");
+        auto vertShaderCode = readFile("shaders/o_vert.spv");
+        auto fragShaderCode = readFile("shaders/o_frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -981,7 +981,7 @@ private:
             deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
         Better way is to give a score to each device and keep the best one
         */
-        return indices.isComplete() && extensionsSupported && swapChainAdequate // && deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        return indices.isComplete() && extensionsSupported && swapChainAdequate; // && deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
     }
 
     bool checkDeviceExtensionSupport(VkPhysicalDevice device)
