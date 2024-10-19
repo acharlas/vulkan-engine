@@ -10,154 +10,330 @@ layout(push_constant) uniform FSConst {
     float time;
 } u_input;
 
-float iTime = u_input.time;
-vec2 iResolution = u_input.resolution;
-vec2 iMouse = u_input.mouse;
+/**
+ * Part 6 Challenges:
+ * - Make a scene of your own! Try to use the rotation transforms, the CSG primitives,
+ *   and the geometric primitives. Remember you can use vector subtraction for translation,
+ *   and component-wise vector multiplication for scaling.
+ */
 
+const int MAX_MARCHING_STEPS = 255;
+const float MIN_DIST = 0.0;
+const float MAX_DIST = 100.0;
+const float EPSILON = 0.0001;
 
-// Protean clouds by nimitz (twitter: @stormoid)
-// https://www.shadertoy.com/view/3l23Rh
-// License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License
-// Contact the author for other licensing options
-
-/*
-	Technical details:
-
-	The main volume noise is generated from a deformed periodic grid, which can produce
-	a large range of noise-like patterns at very cheap evalutation cost. Allowing for multiple
-	fetches of volume gradient computation for improved lighting.
-
-	To further accelerate marching, since the volume is smooth, more than half the the density
-	information isn't used to rendering or shading but only as an underlying volume	distance to 
-	determine dynamic step size, by carefully selecting an equation	(polynomial for speed) to 
-	step as a function of overall density (not necessarily rendered) the visual results can be 
-	the	same as a naive implementation with ~40% increase in rendering performance.
-
-	Since the dynamic marching step size is even less uniform due to steps not being rendered at all
-	the fog is evaluated as the difference of the fog integral at each rendered step.
-
-*/
-
-mat2 rot(in float a){float c = cos(a), s = sin(a);return mat2(c,s,-s,c);}
-const mat3 m3 = mat3(0.33338, 0.56034, -0.71817, -0.87887, 0.32651, -0.15323, 0.15162, 0.69596, 0.61339)*1.93;
-float mag2(vec2 p){return dot(p,p);}
-float linstep(in float mn, in float mx, in float x){ return clamp((x - mn)/(mx - mn), 0., 1.); }
-float prm1 = 0.;
-vec2 bsMo = vec2(0);
-
-vec2 disp(float t){ return vec2(sin(t*0.22)*1., cos(t*0.175)*1.)*2.; }
-
-vec2 map(vec3 p)
-{
-    vec3 p2 = p;
-    p2.xy -= disp(p.z).xy;
-    p.xy *= rot(sin(p.z+iTime)*(0.1 + prm1*0.05) + iTime*0.09);
-    float cl = mag2(p2.xy);
-    float d = 0.;
-    p *= .61;
-    float z = 1.;
-    float trk = 1.;
-    float dspAmp = 0.1 + prm1*0.2;
-    for(int i = 0; i < 5; i++)
-    {
-		p += sin(p.zxy*0.75*trk + iTime*trk*.8)*dspAmp;
-        d -= abs(dot(cos(p), sin(p.yzx))*z);
-        z *= 0.57;
-        trk *= 1.4;
-        p = p*m3;
-    }
-    d = abs(d + prm1*3.)+ prm1*.3 - 2.5 + bsMo.y;
-    return vec2(d + cl*.2 + 0.25, cl);
+/**
+ * Rotation matrix around the X axis.
+ */
+mat3 rotateX(float theta) {
+    float c = cos(theta);
+    float s = sin(theta);
+    return mat3(
+        vec3(1, 0, 0),
+        vec3(0, c, -s),
+        vec3(0, s, c)
+    );
 }
 
-vec4 render( in vec3 ro, in vec3 rd, float time )
-{
-	vec4 rez = vec4(0);
-    const float ldst = 8.;
-	vec3 lpos = vec3(disp(time + ldst)*0.5, time + ldst);
-	float t = 1.5;
-	float fogT = 0.;
-	for(int i=0; i<130; i++)
-	{
-		if(rez.a > 0.99)break;
+/**
+ * Rotation matrix around the Y axis.
+ */
+mat3 rotateY(float theta) {
+    float c = cos(theta);
+    float s = sin(theta);
+    return mat3(
+        vec3(c, 0, s),
+        vec3(0, 1, 0),
+        vec3(-s, 0, c)
+    );
+}
 
-		vec3 pos = ro + t*rd;
-        vec2 mpv = map(pos);
-		float den = clamp(mpv.x-0.3,0.,1.)*1.12;
-		float dn = clamp((mpv.x + 2.),0.,3.);
-        
-		vec4 col = vec4(0);
-        if (mpv.x > 0.6)
-        {
-        
-            col = vec4(sin(vec3(5.,0.4,0.2) + mpv.y*0.1 +sin(pos.z*0.4)*0.5 + 1.8)*0.5 + 0.5,0.08);
-            col *= den*den*den;
-			col.rgb *= linstep(4.,-2.5, mpv.x)*2.3;
-            float dif =  clamp((den - map(pos+.8).x)/9., 0.001, 1. );
-            dif += clamp((den - map(pos+.35).x)/2.5, 0.001, 1. );
-            col.xyz *= den*(vec3(0.005,.045,.075) + 1.5*vec3(0.033,0.07,0.03)*dif);
+/**
+ * Rotation matrix around the Z axis.
+ */
+mat3 rotateZ(float theta) {
+    float c = cos(theta);
+    float s = sin(theta);
+    return mat3(
+        vec3(c, -s, 0),
+        vec3(s, c, 0),
+        vec3(0, 0, 1)
+    );
+}
+
+/**
+ * Constructive solid geometry intersection operation on SDF-calculated distances.
+ */
+float intersectSDF(float distA, float distB) {
+    return max(distA, distB);
+}
+
+/**
+ * Constructive solid geometry union operation on SDF-calculated distances.
+ */
+float unionSDF(float distA, float distB) {
+    return min(distA, distB);
+}
+
+/**
+ * Constructive solid geometry difference operation on SDF-calculated distances.
+ */
+float differenceSDF(float distA, float distB) {
+    return max(distA, -distB);
+}
+
+/**
+ * Signed distance function for a cube centered at the origin
+ * with dimensions specified by size.
+ */
+float boxSDF(vec3 p, vec3 size) {
+    vec3 d = abs(p) - (size / 2.0);
+    
+    // Assuming p is inside the cube, how far is it from the surface?
+    // Result will be negative or zero.
+    float insideDistance = min(max(d.x, max(d.y, d.z)), 0.0);
+    
+    // Assuming p is outside the cube, how far is it from the surface?
+    // Result will be positive or zero.
+    float outsideDistance = length(max(d, 0.0));
+    
+    return insideDistance + outsideDistance;
+}
+
+/**
+ * Signed distance function for a sphere centered at the origin with radius r.
+ */
+float sphereSDF(vec3 p, float r) {
+    return length(p) - r;
+}
+
+/**
+ * Signed distance function for an XY aligned cylinder centered at the origin with
+ * height h and radius r.
+ */
+float cylinderSDF(vec3 p, float h, float r) {
+    // How far inside or outside the cylinder the point is, radially
+    float inOutRadius = length(p.xy) - r;
+    
+    // How far inside or outside the cylinder is, axially aligned with the cylinder
+    float inOutHeight = abs(p.z) - h/2.0;
+    
+    // Assuming p is inside the cylinder, how far is it from the surface?
+    // Result will be negative or zero.
+    float insideDistance = min(max(inOutRadius, inOutHeight), 0.0);
+
+    // Assuming p is outside the cylinder, how far is it from the surface?
+    // Result will be positive or zero.
+    float outsideDistance = length(max(vec2(inOutRadius, inOutHeight), 0.0));
+    
+    return insideDistance + outsideDistance;
+}
+
+/**
+ * Signed distance function describing the scene.
+ * 
+ * Absolute value of the return value indicates the distance to the surface.
+ * Sign indicates whether the point is inside or outside the surface,
+ * negative indicating inside.
+ */
+float sceneSDF(vec3 samplePoint) {    
+    // Slowly spin the whole scene
+    samplePoint = rotateY(u_input.time / 2.0) * samplePoint;
+    
+    float cylinderRadius = 0.4 + (1.0 - 0.4) * (1.0 + sin(1.7 * u_input.time)) / 2.0;
+    float cylinder1 = cylinderSDF(samplePoint, 2.0, cylinderRadius);
+    float cylinder2 = cylinderSDF(rotateX(radians(90.0)) * samplePoint, 2.0, cylinderRadius);
+    float cylinder3 = cylinderSDF(rotateY(radians(90.0)) * samplePoint, 2.0, cylinderRadius);
+    
+    float cube = boxSDF(samplePoint, vec3(1.8, 1.8, 1.8));
+    
+    float sphere = sphereSDF(samplePoint, 1.2);
+    
+    float ballOffset = 0.4 + 1.0 + sin(1.7 * u_input.time);
+    float ballRadius = 0.3;
+    float balls = sphereSDF(samplePoint - vec3(ballOffset, 0.0, 0.0), ballRadius);
+    balls = unionSDF(balls, sphereSDF(samplePoint + vec3(ballOffset, 0.0, 0.0), ballRadius));
+    balls = unionSDF(balls, sphereSDF(samplePoint - vec3(0.0, ballOffset, 0.0), ballRadius));
+    balls = unionSDF(balls, sphereSDF(samplePoint + vec3(0.0, ballOffset, 0.0), ballRadius));
+    balls = unionSDF(balls, sphereSDF(samplePoint - vec3(0.0, 0.0, ballOffset), ballRadius));
+    balls = unionSDF(balls, sphereSDF(samplePoint + vec3(0.0, 0.0, ballOffset), ballRadius));
+    
+    
+    
+    float csgNut = differenceSDF(intersectSDF(cube, sphere),
+                         unionSDF(cylinder1, unionSDF(cylinder2, cylinder3)));
+    
+    return unionSDF(balls, csgNut);
+}
+
+/**
+ * Return the shortest distance from the eyepoint to the scene surface along
+ * the marching direction. If no part of the surface is found between start and end,
+ * return end.
+ * 
+ * eye: the eye point, acting as the origin of the ray
+ * marchingDirection: the normalized direction to march in
+ * start: the starting distance away from the eye
+ * end: the max distance away from the ey to march before giving up
+ */
+float shortestDistanceToSurface(vec3 eye, vec3 marchingDirection, float start, float end) {
+    float depth = start;
+    for (int i = 0; i < MAX_MARCHING_STEPS; i++) {
+        float dist = sceneSDF(eye + depth * marchingDirection);
+        if (dist < EPSILON) {
+			return depth;
         }
-		
-		float fogC = exp(t*0.2 - 2.2);
-		col.rgba += vec4(0.06,0.11,0.11, 0.1)*clamp(fogC-fogT, 0., 1.);
-		fogT = fogC;
-		rez = rez + col*(1. - rez.a);
-		t += clamp(0.5 - dn*dn*.05, 0.09, 0.3);
-	}
-	return clamp(rez, 0.0, 1.0);
+        depth += dist;
+        if (depth >= end) {
+            return end;
+        }
+    }
+    return end;
+}
+            
+
+/**
+ * Return the normalized direction to march in from the eye point for a single pixel.
+ * 
+ * fieldOfView: vertical field of view in degrees
+ * size: resolution of the output image
+ * fragCoord: the x,y coordinate of the pixel in the output image
+ */
+vec3 rayDirection(float fieldOfView, vec2 size, vec2 fragCoord) {
+    vec2 xy = fragCoord - size / 2.0;
+    float z = size.y / tan(radians(fieldOfView) / 2.0);
+    return normalize(vec3(xy, -z));
 }
 
-float getsat(vec3 c)
+/**
+ * Using the gradient of the SDF, estimate the normal on the surface at point p.
+ */
+vec3 estimateNormal(vec3 p) {
+    return normalize(vec3(
+        sceneSDF(vec3(p.x + EPSILON, p.y, p.z)) - sceneSDF(vec3(p.x - EPSILON, p.y, p.z)),
+        sceneSDF(vec3(p.x, p.y + EPSILON, p.z)) - sceneSDF(vec3(p.x, p.y - EPSILON, p.z)),
+        sceneSDF(vec3(p.x, p.y, p.z  + EPSILON)) - sceneSDF(vec3(p.x, p.y, p.z - EPSILON))
+    ));
+}
+
+/**
+ * Lighting contribution of a single point light source via Phong illumination.
+ * 
+ * The vec3 returned is the RGB color of the light's contribution.
+ *
+ * k_a: Ambient color
+ * k_d: Diffuse color
+ * k_s: Specular color
+ * alpha: Shininess coefficient
+ * p: position of point being lit
+ * eye: the position of the camera
+ * lightPos: the position of the light
+ * lightIntensity: color/intensity of the light
+ *
+ * See https://en.wikipedia.org/wiki/Phong_reflection_model#Description
+ */
+vec3 phongContribForLight(vec3 k_d, vec3 k_s, float alpha, vec3 p, vec3 eye,
+                          vec3 lightPos, vec3 lightIntensity) {
+    vec3 N = estimateNormal(p);
+    vec3 L = normalize(lightPos - p);
+    vec3 V = normalize(eye - p);
+    vec3 R = normalize(reflect(-L, N));
+    
+    float dotLN = dot(L, N);
+    float dotRV = dot(R, V);
+    
+    if (dotLN < 0.0) {
+        // Light not visible from this point on the surface
+        return vec3(0.0, 0.0, 0.0);
+    } 
+    
+    if (dotRV < 0.0) {
+        // Light reflection in opposite direction as viewer, apply only diffuse
+        // component
+        return lightIntensity * (k_d * dotLN);
+    }
+    return lightIntensity * (k_d * dotLN + k_s * pow(dotRV, alpha));
+}
+
+/**
+ * Lighting via Phong illumination.
+ * 
+ * The vec3 returned is the RGB color of that point after lighting is applied.
+ * k_a: Ambient color
+ * k_d: Diffuse color
+ * k_s: Specular color
+ * alpha: Shininess coefficient
+ * p: position of point being lit
+ * eye: the position of the camera
+ *
+ * See https://en.wikipedia.org/wiki/Phong_reflection_model#Description
+ */
+vec3 phongIllumination(vec3 k_a, vec3 k_d, vec3 k_s, float alpha, vec3 p, vec3 eye) {
+    const vec3 ambientLight = 0.5 * vec3(1.0, 1.0, 1.0);
+    vec3 color = ambientLight * k_a;
+    
+    vec3 light1Pos = vec3(4.0 * sin(u_input.time),
+                          2.0,
+                          4.0 * cos(u_input.time));
+    vec3 light1Intensity = vec3(0.4, 0.4, 0.4);
+    
+    color += phongContribForLight(k_d, k_s, alpha, p, eye,
+                                  light1Pos,
+                                  light1Intensity);
+    
+    vec3 light2Pos = vec3(2.0 * sin(0.37 * u_input.time),
+                          2.0 * cos(0.37 * u_input.time),
+                          2.0);
+    vec3 light2Intensity = vec3(0.4, 0.4, 0.4);
+    
+    color += phongContribForLight(k_d, k_s, alpha, p, eye,
+                                  light2Pos,
+                                  light2Intensity);    
+    return color;
+}
+
+/**
+ * Return a transform matrix that will transform a ray from view space
+ * to world coordinates, given the eye point, the camera target, and an up vector.
+ *
+ * This assumes that the center of the camera is aligned with the negative z axis in
+ * view space when calculating the ray marching direction. See rayDirection.
+ */
+mat3 viewMatrix(vec3 eye, vec3 center, vec3 up) {
+    // Based on gluLookAt man page
+    vec3 f = normalize(center - eye);
+    vec3 s = normalize(cross(f, up));
+    vec3 u = cross(s, f);
+    return mat3(s, u, -f);
+}
+
+void main( )
 {
-    float mi = min(min(c.x, c.y), c.z);
-    float ma = max(max(c.x, c.y), c.z);
-    return (ma - mi)/(ma+ 1e-7);
-}
-
-//from my "Will it blend" shader (https://www.shadertoy.com/view/lsdGzN)
-vec3 iLerp(in vec3 a, in vec3 b, in float x)
-{
-    vec3 ic = mix(a, b, x) + vec3(1e-6,0.,0.);
-    float sd = abs(getsat(ic) - mix(getsat(a), getsat(b), x));
-    vec3 dir = normalize(vec3(2.*ic.x - ic.y - ic.z, 2.*ic.y - ic.x - ic.z, 2.*ic.z - ic.y - ic.x));
-    float lgt = dot(vec3(1.0), ic);
-    float ff = dot(dir, normalize(ic));
-    ic += 1.5*dir*sd*ff*lgt;
-    return clamp(ic,0.,1.);
-}
-
-void main(  )
-{	
-
-	vec2 q = gl_FragCoord.xy/iResolution.xy;
-    vec2 p = (gl_FragCoord.xy - 0.5*iResolution.xy)/iResolution.y;
-    bsMo = vec2(0);//(iMouse.xy - 0.5*iResolution.xy)/iResolution.y;
+	vec3 viewDir = rayDirection(45.0, u_input.resolution.xy, gl_FragCoord.xy);
+    vec3 eye = vec3(8.0, 5.0 * sin(0.2 * u_input.time), 7.0);
     
-    float time = iTime*3.;
-    vec3 ro = vec3(0,0,time);
+    mat3 viewToWorld = viewMatrix(eye, vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
     
-    ro += vec3(sin(iTime)*0.5,sin(iTime*1.)*1.,0);
-        
-    float dspAmp = .85;
-    ro.xy += disp(ro.z)*dspAmp;
-    float tgtDst = 3.5;
+    vec3 worldDir = viewToWorld * viewDir;
     
-    vec3 target = normalize(ro - vec3(disp(time + tgtDst)*dspAmp, time + tgtDst));
-    ro.x -= bsMo.x*2.;
-    vec3 rightdir = normalize(cross(target, vec3(0,1,0)));
-    vec3 updir = normalize(cross(rightdir, target));
-    rightdir = normalize(cross(updir, target));
-	vec3 rd=normalize((p.x*rightdir + p.y*updir)*1. - target);
-    rd.xy *= rot(-disp(time + 3.5).x*0.2 + bsMo.x);
-    prm1 = smoothstep(-0.4, 0.4,sin(iTime*.3));
-	vec4 scn = render(ro, rd, time);
-		
-    vec3 col = scn.rgb;
-    col = iLerp(col.bgr, col.rgb, clamp(1.-prm1,0.05,1.));
+    float dist = shortestDistanceToSurface(eye, worldDir, MIN_DIST, MAX_DIST);
     
-    col = pow(col, vec3(.55,0.90,0.6))*vec3(1.,.97,.9);
-
-    col *= pow( 16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y), 0.12)*0.7+0.3; //Vign
+    if (dist > MAX_DIST - EPSILON) {
+        // Didn't hit anything
+        outColor = vec4(0.0, 0.0, 0.0, 0.0);
+		return;
+    }
     
-	outColor = vec4( col, 1.0 );
+    // The closest point on the surface to the eyepoint along the view ray
+    vec3 p = eye + dist * worldDir;
+    
+    // Use the surface normal as the ambient color of the material
+    vec3 K_a = (estimateNormal(p) + vec3(1.0)) / 2.0;
+    vec3 K_d = K_a;
+    vec3 K_s = vec3(1.0, 1.0, 1.0);
+    float shininess = 10.0;
+    
+    vec3 color = phongIllumination(K_a, K_d, K_s, shininess, p, eye);
+    
+    outColor = vec4(pow(color,vec3(1.9)), 1.0);
 }

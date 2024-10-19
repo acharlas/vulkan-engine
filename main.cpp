@@ -16,8 +16,8 @@
 
 #define ISFULLSCREEN 0
 
-const uint32_t WIDTH = 500;
-const uint32_t HEIGHT = 500;
+const uint32_t WIDTH = 1024;
+const uint32_t HEIGHT = 576;
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -55,6 +55,7 @@ void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT
     }
 }
 
+// Struct to store queue family indices
 struct QueueFamilyIndices
 {
     std::optional<uint32_t> graphicsFamily;
@@ -66,6 +67,7 @@ struct QueueFamilyIndices
     }
 };
 
+// Struct to store details about swap chain support
 struct SwapChainSupportDetails
 {
     VkSurfaceCapabilitiesKHR capabilities;
@@ -76,6 +78,7 @@ struct SwapChainSupportDetails
 class VulkanEngine
 {
 public:
+    // Entry point for the Vulkan Engine
     void run()
     {
         initWindow();
@@ -120,12 +123,11 @@ private:
     uint32_t currentFrame = 0;
     bool framebufferResized = false;
 
+    // Initialize GLFW window
     void initWindow()
     {
         glfwInit();
-
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        // glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_FALSE);
 
         window = glfwCreateWindow(
             ISFULLSCREEN ? 1920 : WIDTH,
@@ -135,32 +137,30 @@ private:
         glfwSetWindowUserPointer(window, this);
         glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
+
+    // GLFW callback for window resizing
     static void framebufferResizeCallback(GLFWwindow *window, int width, int height)
     {
         auto app = reinterpret_cast<VulkanEngine *>(glfwGetWindowUserPointer(window));
         app->framebufferResized = true;
     }
 
+    // Initialize Vulkan components
     void initVulkan()
     {
-        createInstance();
-        setupDebugMessenger();
-        createSurface();
-        pickPhysicalDevice();
-        createLogicalDevice();
-        // createDescriptorPool();
-        createSwapChain();
-        createImageViews();
-        createRenderPass();
-        createGraphicsPipeline();
-        createFramebuffers();
-        createCommandPool();
-        createCommandBuffer();
-        createSyncObjects();
-    }
-
-    void initImGui()
-    {
+        createInstance();          // Create Vulkan instance
+        setupDebugMessenger();     // Setup validation/debugging layers
+        createSurface();           // Create the surface for rendering
+        pickPhysicalDevice();      // Select the appropriate GPU
+        createLogicalDevice();     // Create logical device for GPU interaction
+        createSwapChain();         // Create the swap chain for presenting images
+        createImageViews();        // Create image views for swap chain images
+        createRenderPass();        // Setup render pass for drawing
+        createGraphicsPipeline();  // Create the graphics pipeline
+        createFramebuffers();      // Create framebuffers for rendering
+        createCommandPool();       // Allocate command buffers
+        createCommandBuffer();     // Record commands into buffers
+        createSyncObjects();       // Setup synchronization objects (semaphores, fences)
     }
 
     void mainLoop()
@@ -168,9 +168,8 @@ private:
         while (!glfwWindowShouldClose(window))
         {
             glfwSetKeyCallback(window, key_callback);
-
             glfwPollEvents();
-            drawFrame();
+            drawFrame();  // Render a frame
         }
         vkDeviceWaitIdle(device);
     }
@@ -190,13 +189,14 @@ private:
         vkDestroySwapchainKHR(device, swapChain, nullptr);
     }
 
+
+    // Clean up Vulkan resources
     void cleanup()
     {
         cleanupSwapChain();
 
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-
         vkDestroyRenderPass(device, renderPass, nullptr);
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
@@ -207,7 +207,6 @@ private:
         }
 
         vkDestroyCommandPool(device, commandPool, nullptr);
-
         vkDestroyDevice(device, nullptr);
 
         if (enableValidationLayers)
@@ -219,10 +218,10 @@ private:
         vkDestroyInstance(instance, nullptr);
 
         glfwDestroyWindow(window);
-
         glfwTerminate();
     }
 
+    // Recreate swap chain after resize
     void recreateSwapChain()
     {
         int width = 0, height = 0;
@@ -234,14 +233,13 @@ private:
         }
 
         vkDeviceWaitIdle(device);
-
         cleanupSwapChain();
-
         createSwapChain();
         createImageViews();
         createFramebuffers();
     }
 
+    // Helper function to create the Vulkan instance
     void createInstance()
     {
         if (enableValidationLayers && !checkValidationLayerSupport())
@@ -270,14 +268,12 @@ private:
         {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
-
             populateDebugMessengerCreateInfo(debugCreateInfo);
-            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT *)&debugCreateInfo;
+            createInfo.pNext = &debugCreateInfo;
         }
         else
         {
             createInfo.enabledLayerCount = 0;
-
             createInfo.pNext = nullptr;
         }
 
@@ -287,15 +283,20 @@ private:
         }
     }
 
+    // Helper function to populate debug messenger settings
     void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT &createInfo)
     {
-        createInfo = {};
         createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-        createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+                                     VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                                     VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                                 VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                 VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         createInfo.pfnUserCallback = debugCallback;
     }
 
+    // Setup the debug messenger
     void setupDebugMessenger()
     {
         if (!enableValidationLayers)
@@ -310,6 +311,7 @@ private:
         }
     }
 
+    // Create a surface for rendering
     void createSurface()
     {
         if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS)
@@ -318,6 +320,7 @@ private:
         }
     }
 
+    // Pick a physical device (GPU) to use for Vulkan operations
     void pickPhysicalDevice()
     {
         uint32_t deviceCount = 0;
@@ -346,6 +349,7 @@ private:
         }
     }
 
+    // Create a logical device to interface with the GPU
     void createLogicalDevice()
     {
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
@@ -368,12 +372,9 @@ private:
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
-
         createInfo.pEnabledFeatures = &deviceFeatures;
-
         createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
         createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
@@ -396,21 +397,7 @@ private:
         vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
     }
 
-    // void createDescriptorPool()
-    // {
-    //     VkDescriptorPoolSize pool_sizes[] =
-    //         {
-    //             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
-    //         };
-    //     VkDescriptorPoolCreateInfo pool_info = {};
-    //     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    //     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    //     pool_info.maxSets = 1;
-    //     pool_info.poolSizeCount = (uint32_t)IM_ARRAYSIZE(pool_sizes);
-    //     pool_info.pPoolSizes = pool_sizes;
-    //     vkCreateDescriptorPool(device, &pool_info, nullptr, &g_DescriptorPool);
-    // }
-
+    // Create the swap chain, a queue of images ready to be displayed on screen
     void createSwapChain()
     {
         SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice);
@@ -468,6 +455,7 @@ private:
         swapChainExtent = extent;
     }
 
+    // Create image views for each swap chain image
     void createImageViews()
     {
         swapChainImageViews.resize(swapChainImages.size());
@@ -496,6 +484,7 @@ private:
         }
     }
 
+    // Create the render pass that defines the output of rendering
     void createRenderPass()
     {
         VkAttachmentDescription colorAttachment{};
@@ -540,6 +529,7 @@ private:
         }
     }
 
+    // Create the graphics pipeline that handles vertex and fragment shaders
     void createGraphicsPipeline()
     {
         auto vertShaderCode = readFile("shaders/o_vert.spv");
@@ -655,6 +645,7 @@ private:
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
     }
 
+    // Create framebuffers for rendering
     void createFramebuffers()
     {
         swapChainFramebuffers.resize(swapChainImageViews.size());
@@ -680,6 +671,7 @@ private:
         }
     }
 
+    // Create command pool for allocating command buffers
     void createCommandPool()
     {
         QueueFamilyIndices queueFamilyIndices = findQueueFamilies(physicalDevice);
@@ -695,6 +687,7 @@ private:
         }
     }
 
+    // Create command buffers for recording rendering commands
     void createCommandBuffer()
     {
         commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -703,7 +696,7 @@ private:
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandPool = commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
+        allocInfo.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
 
         if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS)
         {
@@ -711,6 +704,7 @@ private:
         }
     }
 
+    // Record a command buffer for a frame
     void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
     {
         VkCommandBufferBeginInfo beginInfo{};
@@ -733,7 +727,6 @@ private:
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
         VkViewport viewport{};
@@ -750,8 +743,6 @@ private:
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        //-----------------------
-
         double xpos, ypos;
         glfwGetCursorPos(window, &xpos, &ypos);
 
@@ -763,9 +754,7 @@ private:
             (float)glfwGetTime()};
 
         vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(fragmentConstants), fragmentConstants);
-
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-
         vkCmdEndRenderPass(commandBuffer);
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
@@ -774,6 +763,7 @@ private:
         }
     }
 
+    // Create synchronization objects (semaphores, fences)
     void createSyncObjects()
     {
         imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
@@ -798,6 +788,7 @@ private:
         }
     }
 
+    // Draw a frame using the command buffer
     void drawFrame()
     {
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
@@ -816,8 +807,7 @@ private:
         }
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
-
-        vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
+        vkResetCommandBuffer(commandBuffers[currentFrame], 0);
         recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
 
         VkSubmitInfo submitInfo{};
@@ -843,14 +833,10 @@ private:
 
         VkPresentInfoKHR presentInfo{};
         presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-
         presentInfo.waitSemaphoreCount = 1;
         presentInfo.pWaitSemaphores = signalSemaphores;
-
-        VkSwapchainKHR swapChains[] = {swapChain};
         presentInfo.swapchainCount = 1;
-        presentInfo.pSwapchains = swapChains;
-
+        presentInfo.pSwapchains = &swapChain;
         presentInfo.pImageIndices = &imageIndex;
 
         result = vkQueuePresentKHR(presentQueue, &presentInfo);
@@ -868,8 +854,8 @@ private:
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
-    VkShaderModule
-    createShaderModule(const std::vector<char> &code)
+    // Create a Vulkan shader module from SPIR-V bytecode
+    VkShaderModule createShaderModule(const std::vector<char> &code)
     {
         VkShaderModuleCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -885,6 +871,7 @@ private:
         return shaderModule;
     }
 
+    // Choose the best surface format from available formats
     VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats)
     {
         for (const auto &availableFormat : availableFormats)
@@ -898,6 +885,7 @@ private:
         return availableFormats[0];
     }
 
+    // Choose the best presentation mode from available modes
     VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR> &availablePresentModes)
     {
         for (const auto &availablePresentMode : availablePresentModes)
@@ -911,6 +899,7 @@ private:
         return VK_PRESENT_MODE_FIFO_KHR;
     }
 
+    // Determine the extent (resolution) of the swap chain images
     VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR &capabilities)
     {
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max())
@@ -933,6 +922,7 @@ private:
         }
     }
 
+    // Query swap chain support details for a physical device
     SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device)
     {
         SwapChainSupportDetails details;
@@ -960,15 +950,12 @@ private:
         return details;
     }
 
+    // Check if a physical device is suitable for our needs
     bool isDeviceSuitable(VkPhysicalDevice device)
     {
-        VkPhysicalDeviceProperties deviceProperties;
-        vkGetPhysicalDeviceProperties(device, &deviceProperties);
-
         QueueFamilyIndices indices = findQueueFamilies(device);
 
         bool extensionsSupported = checkDeviceExtensionSupport(device);
-
         bool swapChainAdequate = false;
         if (extensionsSupported)
         {
@@ -976,14 +963,10 @@ private:
             swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
         }
 
-        /*
-        Need this to check if the device is discrete or not
-            deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
-        Better way is to give a score to each device and keep the best one
-        */
-        return indices.isComplete() && extensionsSupported && swapChainAdequate; // && deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        return indices.isComplete() && extensionsSupported && swapChainAdequate;
     }
 
+    // Check if the required device extensions are supported
     bool checkDeviceExtensionSupport(VkPhysicalDevice device)
     {
         uint32_t extensionCount;
@@ -1002,6 +985,7 @@ private:
         return requiredExtensions.empty();
     }
 
+    // Find the appropriate queue families (graphics and presentation)
     QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device)
     {
         QueueFamilyIndices indices;
@@ -1039,6 +1023,7 @@ private:
         return indices;
     }
 
+    // Retrieve required extensions for GLFW and Vulkan
     std::vector<const char *> getRequiredExtensions()
     {
         uint32_t glfwExtensionCount = 0;
@@ -1055,6 +1040,7 @@ private:
         return extensions;
     }
 
+    // Check if validation layers are supported
     bool checkValidationLayerSupport()
     {
         uint32_t layerCount;
@@ -1085,6 +1071,7 @@ private:
         return true;
     }
 
+    // Read shader files in binary mode
     static std::vector<char> readFile(const std::string &filename)
     {
         std::ifstream file(filename, std::ios::ate | std::ios::binary);
@@ -1099,19 +1086,19 @@ private:
 
         file.seekg(0);
         file.read(buffer.data(), fileSize);
-
         file.close();
 
         return buffer;
     }
 
+    // Callback function for Vulkan debug messenger
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData, void *pUserData)
     {
         std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
-
         return VK_FALSE;
     }
 
+    // GLFW key callback function
     static void key_callback(GLFWwindow *window, int key, int scancode, int action, int mods)
     {
         if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
