@@ -47,42 +47,27 @@ sudo apt-get install libglfw3 libglfw3-dev
 First, clone the repository to your local machine:
 
 ```
-git clone https://github.com/yourusername/vulkan-engine.git
+git clone https://github.com/acharlas/vulkan-engine
 cd vulkan-engine
 ```
 
 ### Step 2: Build the Project
 
-Make sure CMake is installed, and then build the project.
+Make sure Make is installed, and then build the project.
 
 #### Linux / macOS
 
 ```
-mkdir build
-cd build
-cmake ..
 make
-```
-
-#### Windows (using CMake and Visual Studio)
-
-1. Open a command prompt or PowerShell.
-2. Create a `build` directory and navigate into it:
-
-```
-mkdir build
-cd build
-cmake ..
-cmake --build .
 ```
 
 ### Step 3: Install Vulkan SDK
 
-Make sure the Vulkan SDK is correctly set up. On Windows, this usually involves running the SDK installer. On Linux or macOS, follow the instructions from [Vulkan SDK](https://vulkan.lunarg.com/sdk/home).
+Make sure the Vulkan SDK is correctly set up. On Linux or macOS, follow the instructions from [Vulkan SDK](https://vulkan.lunarg.com/sdk/home).
 
 ## Running the Engine
 
-Once the project is built, you can run the executable from the `build` folder:
+Once the project is built, you can run the executable :
 
 ```
 ./VulkanEngine
