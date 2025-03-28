@@ -1,7 +1,6 @@
 #version 450
 #extension GL_ARB_separate_shader_objects : enable
 
-
 layout(location = 0) out vec4 outColor;
 
 layout(push_constant) uniform FSConst {
@@ -10,330 +9,192 @@ layout(push_constant) uniform FSConst {
     float time;
 } u_input;
 
-/**
- * Part 6 Challenges:
- * - Make a scene of your own! Try to use the rotation transforms, the CSG primitives,
- *   and the geometric primitives. Remember you can use vector subtraction for translation,
- *   and component-wise vector multiplication for scaling.
- */
 
-const int MAX_MARCHING_STEPS = 255;
-const float MIN_DIST = 0.0;
-const float MAX_DIST = 100.0;
-const float EPSILON = 0.0001;
+const int NUM_STEPS = 8;
+const float PI	 	= 3.141592;
+const float EPSILON	= 1e-3;
+#define EPSILON_NRM (0.1 / u_input.resolution.x)
+//#define AA
 
-/**
- * Rotation matrix around the X axis.
- */
-mat3 rotateX(float theta) {
-    float c = cos(theta);
-    float s = sin(theta);
-    return mat3(
-        vec3(1, 0, 0),
-        vec3(0, c, -s),
-        vec3(0, s, c)
-    );
+// sea
+const int ITER_GEOMETRY = 3;
+const int ITER_FRAGMENT = 5;
+const float SEA_HEIGHT = 0.6;
+const float SEA_CHOPPY = 4.0;
+const float SEA_SPEED = 0.8;
+const float SEA_FREQ = 0.16;
+const vec3 SEA_BASE = vec3(0.0,0.09,0.18);
+const vec3 SEA_WATER_COLOR = vec3(0.8,0.9,0.6)*0.6;
+#define SEA_TIME (1.0 + u_input.time * SEA_SPEED)
+const mat2 octave_m = mat2(1.6,1.2,-1.2,1.6);
+
+// math
+mat3 fromEuler(vec3 ang) {
+	vec2 a1 = vec2(sin(ang.x),cos(ang.x));
+    vec2 a2 = vec2(sin(ang.y),cos(ang.y));
+    vec2 a3 = vec2(sin(ang.z),cos(ang.z));
+    mat3 m;
+    m[0] = vec3(a1.y*a3.y+a1.x*a2.x*a3.x,a1.y*a2.x*a3.x+a3.y*a1.x,-a2.y*a3.x);
+	m[1] = vec3(-a2.y*a1.x,a1.y*a2.y,a2.x);
+	m[2] = vec3(a3.y*a1.x*a2.x+a1.y*a3.x,a1.x*a3.x-a1.y*a3.y*a2.x,a2.y*a3.y);
+	return m;
+}
+float hash( vec2 p ) {
+	float h = dot(p,vec2(127.1,311.7));	
+    return fract(sin(h)*43758.5453123);
+}
+float noise( in vec2 p ) {
+    vec2 i = floor( p );
+    vec2 f = fract( p );	
+	vec2 u = f*f*(3.0-2.0*f);
+    return -1.0+2.0*mix( mix( hash( i + vec2(0.0,0.0) ), 
+                     hash( i + vec2(1.0,0.0) ), u.x),
+                mix( hash( i + vec2(0.0,1.0) ), 
+                     hash( i + vec2(1.0,1.0) ), u.x), u.y);
 }
 
-/**
- * Rotation matrix around the Y axis.
- */
-mat3 rotateY(float theta) {
-    float c = cos(theta);
-    float s = sin(theta);
-    return mat3(
-        vec3(c, 0, s),
-        vec3(0, 1, 0),
-        vec3(-s, 0, c)
-    );
+// lighting
+float diffuse(vec3 n,vec3 l,float p) {
+    return pow(dot(n,l) * 0.4 + 0.6,p);
+}
+float specular(vec3 n,vec3 l,vec3 e,float s) {    
+    float nrm = (s + 8.0) / (PI * 8.0);
+    return pow(max(dot(reflect(e,n),l),0.0),s) * nrm;
 }
 
-/**
- * Rotation matrix around the Z axis.
- */
-mat3 rotateZ(float theta) {
-    float c = cos(theta);
-    float s = sin(theta);
-    return mat3(
-        vec3(c, -s, 0),
-        vec3(s, c, 0),
-        vec3(0, 0, 1)
-    );
+// sky
+vec3 getSkyColor(vec3 e) {
+    e.y = (max(e.y,0.0)*0.8+0.2)*0.8;
+    return vec3(pow(1.0-e.y,2.0), 1.0-e.y, 0.6+(1.0-e.y)*0.4) * 1.1;
 }
 
-/**
- * Constructive solid geometry intersection operation on SDF-calculated distances.
- */
-float intersectSDF(float distA, float distB) {
-    return max(distA, distB);
+// sea
+float sea_octave(vec2 uv, float choppy) {
+    uv += noise(uv);        
+    vec2 wv = 1.0-abs(sin(uv));
+    vec2 swv = abs(cos(uv));    
+    wv = mix(wv,swv,wv);
+    return pow(1.0-pow(wv.x * wv.y,0.65),choppy);
 }
 
-/**
- * Constructive solid geometry union operation on SDF-calculated distances.
- */
-float unionSDF(float distA, float distB) {
-    return min(distA, distB);
-}
-
-/**
- * Constructive solid geometry difference operation on SDF-calculated distances.
- */
-float differenceSDF(float distA, float distB) {
-    return max(distA, -distB);
-}
-
-/**
- * Signed distance function for a cube centered at the origin
- * with dimensions specified by size.
- */
-float boxSDF(vec3 p, vec3 size) {
-    vec3 d = abs(p) - (size / 2.0);
+float map(vec3 p) {
+    float freq = SEA_FREQ;
+    float amp = SEA_HEIGHT;
+    float choppy = SEA_CHOPPY;
+    vec2 uv = p.xz; uv.x *= 0.75;
     
-    // Assuming p is inside the cube, how far is it from the surface?
-    // Result will be negative or zero.
-    float insideDistance = min(max(d.x, max(d.y, d.z)), 0.0);
-    
-    // Assuming p is outside the cube, how far is it from the surface?
-    // Result will be positive or zero.
-    float outsideDistance = length(max(d, 0.0));
-    
-    return insideDistance + outsideDistance;
-}
-
-/**
- * Signed distance function for a sphere centered at the origin with radius r.
- */
-float sphereSDF(vec3 p, float r) {
-    return length(p) - r;
-}
-
-/**
- * Signed distance function for an XY aligned cylinder centered at the origin with
- * height h and radius r.
- */
-float cylinderSDF(vec3 p, float h, float r) {
-    // How far inside or outside the cylinder the point is, radially
-    float inOutRadius = length(p.xy) - r;
-    
-    // How far inside or outside the cylinder is, axially aligned with the cylinder
-    float inOutHeight = abs(p.z) - h/2.0;
-    
-    // Assuming p is inside the cylinder, how far is it from the surface?
-    // Result will be negative or zero.
-    float insideDistance = min(max(inOutRadius, inOutHeight), 0.0);
-
-    // Assuming p is outside the cylinder, how far is it from the surface?
-    // Result will be positive or zero.
-    float outsideDistance = length(max(vec2(inOutRadius, inOutHeight), 0.0));
-    
-    return insideDistance + outsideDistance;
-}
-
-/**
- * Signed distance function describing the scene.
- * 
- * Absolute value of the return value indicates the distance to the surface.
- * Sign indicates whether the point is inside or outside the surface,
- * negative indicating inside.
- */
-float sceneSDF(vec3 samplePoint) {    
-    // Slowly spin the whole scene
-    samplePoint = rotateY(u_input.time / 2.0) * samplePoint;
-    
-    float cylinderRadius = 0.4 + (1.0 - 0.4) * (1.0 + sin(1.7 * u_input.time)) / 2.0;
-    float cylinder1 = cylinderSDF(samplePoint, 2.0, cylinderRadius);
-    float cylinder2 = cylinderSDF(rotateX(radians(90.0)) * samplePoint, 2.0, cylinderRadius);
-    float cylinder3 = cylinderSDF(rotateY(radians(90.0)) * samplePoint, 2.0, cylinderRadius);
-    
-    float cube = boxSDF(samplePoint, vec3(1.8, 1.8, 1.8));
-    
-    float sphere = sphereSDF(samplePoint, 1.2);
-    
-    float ballOffset = 0.4 + 1.0 + sin(1.7 * u_input.time);
-    float ballRadius = 0.3;
-    float balls = sphereSDF(samplePoint - vec3(ballOffset, 0.0, 0.0), ballRadius);
-    balls = unionSDF(balls, sphereSDF(samplePoint + vec3(ballOffset, 0.0, 0.0), ballRadius));
-    balls = unionSDF(balls, sphereSDF(samplePoint - vec3(0.0, ballOffset, 0.0), ballRadius));
-    balls = unionSDF(balls, sphereSDF(samplePoint + vec3(0.0, ballOffset, 0.0), ballRadius));
-    balls = unionSDF(balls, sphereSDF(samplePoint - vec3(0.0, 0.0, ballOffset), ballRadius));
-    balls = unionSDF(balls, sphereSDF(samplePoint + vec3(0.0, 0.0, ballOffset), ballRadius));
-    
-    
-    
-    float csgNut = differenceSDF(intersectSDF(cube, sphere),
-                         unionSDF(cylinder1, unionSDF(cylinder2, cylinder3)));
-    
-    return unionSDF(balls, csgNut);
-}
-
-/**
- * Return the shortest distance from the eyepoint to the scene surface along
- * the marching direction. If no part of the surface is found between start and end,
- * return end.
- * 
- * eye: the eye point, acting as the origin of the ray
- * marchingDirection: the normalized direction to march in
- * start: the starting distance away from the eye
- * end: the max distance away from the ey to march before giving up
- */
-float shortestDistanceToSurface(vec3 eye, vec3 marchingDirection, float start, float end) {
-    float depth = start;
-    for (int i = 0; i < MAX_MARCHING_STEPS; i++) {
-        float dist = sceneSDF(eye + depth * marchingDirection);
-        if (dist < EPSILON) {
-			return depth;
-        }
-        depth += dist;
-        if (depth >= end) {
-            return end;
-        }
+    float d, h = 0.0;    
+    for(int i = 0; i < ITER_GEOMETRY; i++) {        
+    	d = sea_octave((uv+SEA_TIME)*freq,choppy);
+    	d += sea_octave((uv-SEA_TIME)*freq,choppy);
+        h += d * amp;        
+    	uv *= octave_m; freq *= 1.9; amp *= 0.22;
+        choppy = mix(choppy,1.0,0.2);
     }
-    return end;
-}
-            
-
-/**
- * Return the normalized direction to march in from the eye point for a single pixel.
- * 
- * fieldOfView: vertical field of view in degrees
- * size: resolution of the output image
- * fragCoord: the x,y coordinate of the pixel in the output image
- */
-vec3 rayDirection(float fieldOfView, vec2 size, vec2 fragCoord) {
-    vec2 xy = fragCoord - size / 2.0;
-    float z = size.y / tan(radians(fieldOfView) / 2.0);
-    return normalize(vec3(xy, -z));
+    return p.y - h;
 }
 
-/**
- * Using the gradient of the SDF, estimate the normal on the surface at point p.
- */
-vec3 estimateNormal(vec3 p) {
-    return normalize(vec3(
-        sceneSDF(vec3(p.x + EPSILON, p.y, p.z)) - sceneSDF(vec3(p.x - EPSILON, p.y, p.z)),
-        sceneSDF(vec3(p.x, p.y + EPSILON, p.z)) - sceneSDF(vec3(p.x, p.y - EPSILON, p.z)),
-        sceneSDF(vec3(p.x, p.y, p.z  + EPSILON)) - sceneSDF(vec3(p.x, p.y, p.z - EPSILON))
-    ));
-}
-
-/**
- * Lighting contribution of a single point light source via Phong illumination.
- * 
- * The vec3 returned is the RGB color of the light's contribution.
- *
- * k_a: Ambient color
- * k_d: Diffuse color
- * k_s: Specular color
- * alpha: Shininess coefficient
- * p: position of point being lit
- * eye: the position of the camera
- * lightPos: the position of the light
- * lightIntensity: color/intensity of the light
- *
- * See https://en.wikipedia.org/wiki/Phong_reflection_model#Description
- */
-vec3 phongContribForLight(vec3 k_d, vec3 k_s, float alpha, vec3 p, vec3 eye,
-                          vec3 lightPos, vec3 lightIntensity) {
-    vec3 N = estimateNormal(p);
-    vec3 L = normalize(lightPos - p);
-    vec3 V = normalize(eye - p);
-    vec3 R = normalize(reflect(-L, N));
+float map_detailed(vec3 p) {
+    float freq = SEA_FREQ;
+    float amp = SEA_HEIGHT;
+    float choppy = SEA_CHOPPY;
+    vec2 uv = p.xz; uv.x *= 0.75;
     
-    float dotLN = dot(L, N);
-    float dotRV = dot(R, V);
-    
-    if (dotLN < 0.0) {
-        // Light not visible from this point on the surface
-        return vec3(0.0, 0.0, 0.0);
-    } 
-    
-    if (dotRV < 0.0) {
-        // Light reflection in opposite direction as viewer, apply only diffuse
-        // component
-        return lightIntensity * (k_d * dotLN);
+    float d, h = 0.0;    
+    for(int i = 0; i < ITER_FRAGMENT; i++) {        
+    	d = sea_octave((uv+SEA_TIME)*freq,choppy);
+    	d += sea_octave((uv-SEA_TIME)*freq,choppy);
+        h += d * amp;        
+    	uv *= octave_m; freq *= 1.9; amp *= 0.22;
+        choppy = mix(choppy,1.0,0.2);
     }
-    return lightIntensity * (k_d * dotLN + k_s * pow(dotRV, alpha));
+    return p.y - h;
 }
 
-/**
- * Lighting via Phong illumination.
- * 
- * The vec3 returned is the RGB color of that point after lighting is applied.
- * k_a: Ambient color
- * k_d: Diffuse color
- * k_s: Specular color
- * alpha: Shininess coefficient
- * p: position of point being lit
- * eye: the position of the camera
- *
- * See https://en.wikipedia.org/wiki/Phong_reflection_model#Description
- */
-vec3 phongIllumination(vec3 k_a, vec3 k_d, vec3 k_s, float alpha, vec3 p, vec3 eye) {
-    const vec3 ambientLight = 0.5 * vec3(1.0, 1.0, 1.0);
-    vec3 color = ambientLight * k_a;
+vec3 getSeaColor(vec3 p, vec3 n, vec3 l, vec3 eye, vec3 dist) {  
+    float fresnel = clamp(1.0 - dot(n,-eye), 0.0, 1.0);
+    fresnel = min(pow(fresnel,3.0), 0.5);
+        
+    vec3 reflected = getSkyColor(reflect(eye,n));    
+    vec3 refracted = SEA_BASE + diffuse(n,l,80.0) * SEA_WATER_COLOR * 0.12; 
     
-    vec3 light1Pos = vec3(4.0 * sin(u_input.time),
-                          2.0,
-                          4.0 * cos(u_input.time));
-    vec3 light1Intensity = vec3(0.4, 0.4, 0.4);
+    vec3 color = mix(refracted,reflected,fresnel);
     
-    color += phongContribForLight(k_d, k_s, alpha, p, eye,
-                                  light1Pos,
-                                  light1Intensity);
+    float atten = max(1.0 - dot(dist,dist) * 0.001, 0.0);
+    color += SEA_WATER_COLOR * (p.y - SEA_HEIGHT) * 0.18 * atten;
     
-    vec3 light2Pos = vec3(2.0 * sin(0.37 * u_input.time),
-                          2.0 * cos(0.37 * u_input.time),
-                          2.0);
-    vec3 light2Intensity = vec3(0.4, 0.4, 0.4);
+    color += vec3(specular(n,l,eye,60.0));
     
-    color += phongContribForLight(k_d, k_s, alpha, p, eye,
-                                  light2Pos,
-                                  light2Intensity);    
     return color;
 }
 
-/**
- * Return a transform matrix that will transform a ray from view space
- * to world coordinates, given the eye point, the camera target, and an up vector.
- *
- * This assumes that the center of the camera is aligned with the negative z axis in
- * view space when calculating the ray marching direction. See rayDirection.
- */
-mat3 viewMatrix(vec3 eye, vec3 center, vec3 up) {
-    // Based on gluLookAt man page
-    vec3 f = normalize(center - eye);
-    vec3 s = normalize(cross(f, up));
-    vec3 u = cross(s, f);
-    return mat3(s, u, -f);
+// tracing
+vec3 getNormal(vec3 p, float eps) {
+    vec3 n;
+    n.y = map_detailed(p);    
+    n.x = map_detailed(vec3(p.x+eps,p.y,p.z)) - n.y;
+    n.z = map_detailed(vec3(p.x,p.y,p.z+eps)) - n.y;
+    n.y = eps;
+    return normalize(n);
 }
 
-void main( )
-{
-	vec3 viewDir = rayDirection(45.0, u_input.resolution.xy, gl_FragCoord.xy);
-    vec3 eye = vec3(8.0, 5.0 * sin(0.2 * u_input.time), 7.0);
-    
-    mat3 viewToWorld = viewMatrix(eye, vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
-    
-    vec3 worldDir = viewToWorld * viewDir;
-    
-    float dist = shortestDistanceToSurface(eye, worldDir, MIN_DIST, MAX_DIST);
-    
-    if (dist > MAX_DIST - EPSILON) {
-        // Didn't hit anything
-        outColor = vec4(0.0, 0.0, 0.0, 0.0);
-		return;
+float heightMapTracing(vec3 ori, vec3 dir, out vec3 p) {  
+    float tm = 0.0;
+    float tx = 1000.0;    
+    float hx = map(ori + dir * tx);
+    if(hx > 0.0) {
+        p = ori + dir * tx;
+        return tx;   
     }
+    float hm = map(ori + dir * tm);    
+    float tmid = 0.0;
+    for(int i = 0; i < NUM_STEPS; i++) {
+        tmid = mix(tm,tx, hm/(hm-hx));                   
+        p = ori + dir * tmid;                   
+    	float hmid = map(p);
+		if(hmid < 0.0) {
+        	tx = tmid;
+            hx = hmid;
+        } else {
+            tm = tmid;
+            hm = hmid;
+        }
+    }
+    return tmid;
+}
+
+vec3 ft_getPixel(in vec2 coord, float time) {    
+    vec2 uv = coord / u_input.resolution.xy;
+    uv = uv * 2.0 - 1.0;
+    uv.y = -uv.y;
+    uv.x *= u_input.resolution.x / u_input.resolution.y;    
+        
+    // ray
+    vec3 ang = vec3(sin(time*3.0)*0.1,sin(time)*0.2+0.3,time);    
+    vec3 ori = vec3(0.0,3.5,time*5.0);
+    vec3 dir = normalize(vec3(uv.xy,-2.0)); dir.z += length(uv) * 0.14;
+    dir = normalize(dir) * fromEuler(ang);
     
-    // The closest point on the surface to the eyepoint along the view ray
-    vec3 p = eye + dist * worldDir;
+    // tracing
+    vec3 p;
+    heightMapTracing(ori,dir,p);
+    vec3 dist = p - ori;
+    vec3 n = getNormal(p, dot(dist,dist) * EPSILON_NRM);
+    vec3 light = normalize(vec3(0.0,1.0,0.8)); 
+             
+    // color
+    return mix(
+        getSkyColor(dir),
+        getSeaColor(p,n,light,dir,dist),
+    	pow(smoothstep(0.0,-0.02,dir.y),0.2));
+}
+
+// main
+void main( ) {
+    float time = u_input.time * 0.8;
+    vec3 color = ft_getPixel(gl_FragCoord.xy, time);
+
     
-    // Use the surface normal as the ambient color of the material
-    vec3 K_a = (estimateNormal(p) + vec3(1.0)) / 2.0;
-    vec3 K_d = K_a;
-    vec3 K_s = vec3(1.0, 1.0, 1.0);
-    float shininess = 10.0;
-    
-    vec3 color = phongIllumination(K_a, K_d, K_s, shininess, p, eye);
-    
-    outColor = vec4(pow(color,vec3(1.9)), 1.0);
+    // post
+	outColor = vec4(pow(color,vec3(1.6)), 1.0);
 }

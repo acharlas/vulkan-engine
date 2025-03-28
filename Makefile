@@ -10,10 +10,10 @@ debug: main.cpp
 .PHONY: test clean
 
 test: RT
-	./RT
+	./VulkanEngine
 
 clean:
-	rm -f RT
-	rm -f RT_Debug
+	rm -f VulkanEngine
+	rm -f VulkanEngine_Debug
 
 re: clean RT

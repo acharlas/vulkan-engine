@@ -1,3 +1,7 @@
+<p align="center">
+<img src="./screenshots/vulkanengine-gif.gif" alt="gif home page" width="100%"/>
+</p>
+
 # Vulkan Engine Project
 
 This project is a basic implementation of a rendering engine using Vulkan and GLFW. It walks through setting up a Vulkan environment from initializing a window to rendering a simple scene.
@@ -33,12 +37,19 @@ Before running this project, make sure your system meets the following requireme
 - **GLFW**: Ensure GLFW is installed on your system. You can get it from the [GLFW website](https://www.glfw.org/).
 - **CMake**: Install CMake to handle building the project. You can get it from the [CMake website](https://cmake.org/).
 - **C++ Compiler**: A modern C++ compiler that supports C++11 or newer (e.g., GCC, Clang, or MSVC).
-  
+
 For Linux-based systems, you may also need to install the following:
 
 ```
-sudo apt-get install libglfw3 libglfw3-dev
+sudo apt-get install libglfw3 libglfw3-dev vulkan-tools libglm-dev libxxf86vm-dev libxi-dev
 ```
+
+## Screenshots
+
+<p align="center">
+  <img src="./screenshots/vulkanengine-cloud-screenshot.png" alt="thomas chaos" width="50%" style="margin: 10px;"/>
+  <img src="./screenshots/vulkanengine-water-screenshot.png" alt="default" width="50%" style="margin: 10px;"/>
+</p>
 
 ## Installation
 
