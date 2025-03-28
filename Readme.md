@@ -47,8 +47,8 @@ sudo apt-get install libglfw3 libglfw3-dev vulkan-tools libglm-dev libxxf86vm-de
 ## Screenshots
 
 <p align="center">
-  <img src="./screenshots/vulkanengine-cloud-screenshot.png" alt="thomas chaos" width="50%" style="margin: 10px;"/>
-  <img src="./screenshots/vulkanengine-water-screenshot.png" alt="default" width="50%" style="margin: 10px;"/>
+  <img src="./screenshots/vulkanengine-cloud-screenshot.png" alt="thomas chaos" width="45%" style="margin: 10px;"/>
+  <img src="./screenshots/vulkanengine-water-screenshot.png" alt="default" width="45%" style="margin: 10px;"/>
 </p>
 
 ## Installation
