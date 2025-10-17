@@ -10,16 +10,122 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <array>
+#include <numeric>
 #include <limits>
 #include <optional>
 #include <set>
+#include <filesystem>
+#include <cmath>
+#include <system_error>
 
 #define ISFULLSCREEN 0
 
-const uint32_t WIDTH = 1024;
-const uint32_t HEIGHT = 576;
+const uint32_t WIDTH = 500;
+const uint32_t HEIGHT = 500;
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
+const size_t FRAME_TIME_HISTORY = 120;
+const size_t HISTOGRAM_BIN_COUNT = 24;
+
+struct BenchmarkSettings
+{
+    bool enabled = false;
+    bool headless = false;
+    bool enableVSync = true;
+    uint32_t windowWidth = WIDTH;
+    uint32_t windowHeight = HEIGHT;
+    double durationSeconds = 0.0;
+    uint64_t frameLimit = 0;
+    uint32_t warmupFrames = 0;
+    double fixedTimeStepMs = 0.0;
+    std::string csvPath;
+};
+
+struct EngineConfig
+{
+    uint32_t windowWidth = WIDTH;
+    uint32_t windowHeight = HEIGHT;
+    bool fullscreen = ISFULLSCREEN;
+    bool enableOverlay = false;
+    bool enableVSync = true;
+    BenchmarkSettings benchmark;
+};
+
+static bool startsWith(const std::string &value, const std::string &prefix)
+{
+    return value.rfind(prefix, 0) == 0;
+}
+
+static bool parseUint32(const std::string &text, uint32_t &output)
+{
+    try
+    {
+        output = static_cast<uint32_t>(std::stoul(text));
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+static bool parseUint64(const std::string &text, uint64_t &output)
+{
+    try
+    {
+        output = static_cast<uint64_t>(std::stoull(text));
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+static bool parseDouble(const std::string &text, double &output)
+{
+    try
+    {
+        output = std::stod(text);
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+static void printUsage()
+{
+    std::cout << "Usage: VulkanEngine [options]\n"
+              << "\n"
+              << "General options:\n"
+              << "  -h, --help                     Show this help and exit\n"
+              << "  --window-width=<pixels>        Override window width (default " << WIDTH << ")\n"
+              << "  --window-height=<pixels>       Override window height (default " << HEIGHT << ")\n"
+              << "  --fullscreen                   Start in fullscreen mode\n"
+              << "  --vsync                        Enable v-sync (default)\n"
+              << "  --no-vsync                     Disable v-sync\n"
+              << "\n"
+              << "Benchmark options:\n"
+              << "  --benchmark                    Enable benchmark mode\n"
+              << "  --benchmark-headless           Hide the window during benchmark\n"
+              << "  --benchmark-seconds=<sec>      Stop after the requested measured seconds\n"
+              << "  --benchmark-frames=<count>     Stop after the requested measured frame count\n"
+              << "  --benchmark-warmup=<frames>    Skip recording for the first N frames\n"
+              << "  --benchmark-fixed-delta=<ms>   Simulate using a fixed timestep (ms) per frame\n"
+              << "  --benchmark-csv=<path>         Write per-frame stats to CSV\n"
+              << "  --benchmark-width=<pixels>     Override window width in benchmark mode\n"
+              << "  --benchmark-height=<pixels>    Override window height in benchmark mode\n"
+              << "  --benchmark-no-vsync           Disable v-sync during benchmark\n"
+              << "  --benchmark-vsync              Force v-sync during benchmark\n"
+              << std::endl;
+}
 
 const std::vector<const char *> validationLayers = {
     "VK_LAYER_KHRONOS_validation"};
@@ -78,16 +184,23 @@ struct SwapChainSupportDetails
 class VulkanEngine
 {
 public:
+    explicit VulkanEngine(const EngineConfig &engineConfig)
+        : config(engineConfig)
+    {
+    }
+
     // Entry point for the Vulkan Engine
     void run()
     {
         initWindow();
         initVulkan();
         mainLoop();
+        finalizeBenchmark();
         cleanup();
     }
 
 private:
+    EngineConfig config{};
     GLFWwindow *window;
 
     VkInstance instance;
@@ -95,8 +208,9 @@ private:
     VkSurfaceKHR surface;
 
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    VkPhysicalDeviceProperties physicalDeviceProperties{};
     VkDevice device;
-    VkDescriptorPool g_DescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
 
     VkQueue graphicsQueue;
     VkQueue presentQueue;
@@ -123,16 +237,62 @@ private:
     uint32_t currentFrame = 0;
     bool framebufferResized = false;
 
+    std::chrono::steady_clock::time_point lastFrameTimestamp{};
+    std::array<float, FRAME_TIME_HISTORY> frameTimeHistory{};
+    size_t frameTimeWriteIndex = 0;
+    bool frameTimeHistoryFilled = false;
+    float currentFrameTimeMs = 0.0f;
+    float currentFPS = 0.0f;
+    float averageFPS = 0.0f;
+    float averageFrameTimeMs = 0.0f;
+    std::array<float, HISTOGRAM_BIN_COUNT> frameTimeHistogram{};
+    float histogramMaxFrameTimeMs = 0.0f;
+    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> descriptorSets;
+    std::vector<VkBuffer> overlayUniformBuffers;
+    std::vector<VkDeviceMemory> overlayUniformBuffersMemory;
+    std::vector<void *> overlayUniformMappedMemory;
+    VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
+    bool gpuTimestampsSupported = false;
+    float timestampPeriodNs = 0.0f;
+
+    struct OverlayUniformData
+    {
+        glm::vec4 metrics;
+        glm::vec4 histogram[HISTOGRAM_BIN_COUNT];
+        glm::vec4 histogramInfo;
+    } overlayUniformData{};
+
+    std::chrono::steady_clock::time_point lastStatsPrintTime{};
+    float statsAccumulatedFrameTimeMs = 0.0f;
+    uint32_t statsFrameCounter = 0;
+    double benchmarkElapsedSeconds = 0.0;
+    uint64_t benchmarkSubmittedFrames = 0;
+    double benchmarkMeasuredSeconds = 0.0;
+    double benchmarkSimulationTimeSeconds = 0.0;
+    std::vector<float> benchmarkCpuFrameTimes;
+    std::vector<float> benchmarkGpuFrameTimes;
+    std::ofstream benchmarkCsvStream;
+    bool benchmarkCsvHeaderWritten = false;
+
     // Initialize GLFW window
     void initWindow()
     {
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
+        if (config.benchmark.enabled && config.benchmark.headless)
+        {
+            glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+        }
+
+        const uint32_t targetWidth = config.benchmark.enabled ? config.benchmark.windowWidth : config.windowWidth;
+        const uint32_t targetHeight = config.benchmark.enabled ? config.benchmark.windowHeight : config.windowHeight;
+
         window = glfwCreateWindow(
-            ISFULLSCREEN ? 1920 : WIDTH,
-            ISFULLSCREEN ? 1080 : HEIGHT, "Vulkan",
-            ISFULLSCREEN ? glfwGetPrimaryMonitor() : nullptr,
+            config.fullscreen ? 1920 : static_cast<int>(targetWidth),
+            config.fullscreen ? 1080 : static_cast<int>(targetHeight), "Vulkan",
+            config.fullscreen ? glfwGetPrimaryMonitor() : nullptr,
             nullptr);
         glfwSetWindowUserPointer(window, this);
         glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
@@ -156,20 +316,57 @@ private:
         createSwapChain();         // Create the swap chain for presenting images
         createImageViews();        // Create image views for swap chain images
         createRenderPass();        // Setup render pass for drawing
+        createDescriptorSetLayout(); // Describe resources for shaders
         createGraphicsPipeline();  // Create the graphics pipeline
         createFramebuffers();      // Create framebuffers for rendering
         createCommandPool();       // Allocate command buffers
+        createTimestampQueryPool(); // Prepare query pool for GPU timings
+        createOverlayUniformBuffers(); // Allocate uniform buffers for overlay stats
+        createDescriptorPool();    // Allocate descriptor pool
+        createDescriptorSets();    // Allocate descriptor sets for overlay data
         createCommandBuffer();     // Record commands into buffers
         createSyncObjects();       // Setup synchronization objects (semaphores, fences)
     }
 
     void mainLoop()
     {
+        lastFrameTimestamp = std::chrono::steady_clock::now();
+        frameTimeHistory.fill(0.0f);
+        frameTimeHistogram.fill(0.0f);
+        frameTimeWriteIndex = 0;
+        frameTimeHistoryFilled = false;
+        lastStatsPrintTime = lastFrameTimestamp;
+        statsAccumulatedFrameTimeMs = 0.0f;
+        statsFrameCounter = 0;
+        benchmarkElapsedSeconds = 0.0;
+        benchmarkMeasuredSeconds = 0.0;
+        benchmarkSubmittedFrames = 0;
+        benchmarkSimulationTimeSeconds = 0.0;
+        benchmarkCpuFrameTimes.clear();
+        benchmarkGpuFrameTimes.clear();
+        benchmarkCsvHeaderWritten = false;
+        if (benchmarkCsvStream.is_open())
+        {
+            benchmarkCsvStream.close();
+        }
+        if (config.benchmark.enabled && !config.benchmark.csvPath.empty())
+        {
+            openBenchmarkLog();
+        }
+
         while (!glfwWindowShouldClose(window))
         {
-            glfwSetKeyCallback(window, key_callback);
+            if (!config.benchmark.enabled || !config.benchmark.headless)
+            {
+                glfwSetKeyCallback(window, key_callback);
+            }
             glfwPollEvents();
             drawFrame();  // Render a frame
+
+            if (shouldTerminateBenchmark())
+            {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
         }
         vkDeviceWaitIdle(device);
     }
@@ -198,6 +395,46 @@ private:
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
+
+        if (descriptorPool != VK_NULL_HANDLE)
+        {
+            vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+            descriptorPool = VK_NULL_HANDLE;
+        }
+
+        if (descriptorSetLayout != VK_NULL_HANDLE)
+        {
+            vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+            descriptorSetLayout = VK_NULL_HANDLE;
+        }
+
+        if (timestampQueryPool != VK_NULL_HANDLE)
+        {
+            vkDestroyQueryPool(device, timestampQueryPool, nullptr);
+            timestampQueryPool = VK_NULL_HANDLE;
+        }
+
+        for (size_t i = 0; i < overlayUniformBuffers.size(); ++i)
+        {
+            if (i < overlayUniformMappedMemory.size() && overlayUniformMappedMemory[i] != nullptr)
+            {
+                vkUnmapMemory(device, overlayUniformBuffersMemory[i]);
+                overlayUniformMappedMemory[i] = nullptr;
+            }
+
+            vkDestroyBuffer(device, overlayUniformBuffers[i], nullptr);
+            vkFreeMemory(device, overlayUniformBuffersMemory[i], nullptr);
+        }
+
+        overlayUniformBuffers.clear();
+        overlayUniformBuffersMemory.clear();
+        overlayUniformMappedMemory.clear();
+        descriptorSets.clear();
+
+        if (benchmarkCsvStream.is_open())
+        {
+            benchmarkCsvStream.close();
+        }
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
@@ -237,6 +474,339 @@ private:
         createSwapChain();
         createImageViews();
         createFramebuffers();
+    }
+
+    void updateFrameStats(float frameTimeMs)
+    {
+        const float sanitizedFrameTime = frameTimeMs > 0.0f ? frameTimeMs : 0.0001f;
+        currentFrameTimeMs = sanitizedFrameTime;
+
+        frameTimeHistory[frameTimeWriteIndex] = sanitizedFrameTime;
+        frameTimeWriteIndex = (frameTimeWriteIndex + 1) % FRAME_TIME_HISTORY;
+        if (!frameTimeHistoryFilled && frameTimeWriteIndex == 0)
+        {
+            frameTimeHistoryFilled = true;
+        }
+
+        const size_t sampleCount = frameTimeHistoryFilled ? FRAME_TIME_HISTORY : frameTimeWriteIndex;
+        if (sampleCount == 0)
+        {
+            currentFPS = 0.0f;
+            averageFPS = 0.0f;
+            averageFrameTimeMs = 0.0f;
+            histogramMaxFrameTimeMs = 0.0f;
+            frameTimeHistogram.fill(0.0f);
+            return;
+        }
+
+        currentFPS = currentFrameTimeMs > 0.0f ? 1000.0f / currentFrameTimeMs : 0.0f;
+
+        float sum = 0.0f;
+        float maxSample = 0.0f;
+
+        if (frameTimeHistoryFilled)
+        {
+            for (float sample : frameTimeHistory)
+            {
+                sum += sample;
+                maxSample = std::max(maxSample, sample);
+            }
+        }
+        else
+        {
+            for (size_t i = 0; i < sampleCount; ++i)
+            {
+                const float sample = frameTimeHistory[i];
+                sum += sample;
+                maxSample = std::max(maxSample, sample);
+            }
+        }
+
+        averageFrameTimeMs = sum / static_cast<float>(sampleCount);
+        averageFPS = averageFrameTimeMs > 0.0f ? 1000.0f / averageFrameTimeMs : 0.0f;
+
+        float safeMax = maxSample;
+        if (safeMax <= 0.0f)
+        {
+            safeMax = currentFrameTimeMs > 0.0f ? currentFrameTimeMs : 16.0f;
+        }
+
+        frameTimeHistogram.fill(0.0f);
+        const size_t historyCount = std::min(sampleCount, static_cast<size_t>(HISTOGRAM_BIN_COUNT));
+
+        for (size_t i = 0; i < historyCount; ++i)
+        {
+            const size_t sourceOffset = sampleCount - historyCount + i;
+            const size_t bufferIndex = frameTimeHistoryFilled ? (frameTimeWriteIndex + sourceOffset) % FRAME_TIME_HISTORY : sourceOffset;
+            const float sample = frameTimeHistory[bufferIndex];
+            float normalizedSample = sample / safeMax;
+            if (normalizedSample < 0.0f)
+            {
+                normalizedSample = 0.0f;
+            }
+            if (normalizedSample > 1.0f)
+            {
+                normalizedSample = 1.0f;
+            }
+            frameTimeHistogram[i] = normalizedSample;
+        }
+
+        histogramMaxFrameTimeMs = safeMax;
+
+        maybePrintStats(currentFrameTimeMs);
+    }
+
+    void maybePrintStats(float frameTimeMs)
+    {
+        if (config.benchmark.enabled)
+        {
+            return;
+        }
+
+        statsAccumulatedFrameTimeMs += frameTimeMs;
+        statsFrameCounter++;
+
+        const auto now = std::chrono::steady_clock::now();
+        const float elapsedMs = std::chrono::duration<float, std::milli>(now - lastStatsPrintTime).count();
+
+        if (elapsedMs < 1000.0f)
+        {
+            return;
+        }
+
+        const float fps = elapsedMs > 0.0f ? (static_cast<float>(statsFrameCounter) * 1000.0f / elapsedMs) : 0.0f;
+        const float avgFrameMs = statsFrameCounter > 0 ? statsAccumulatedFrameTimeMs / static_cast<float>(statsFrameCounter) : 0.0f;
+
+        std::ostringstream message;
+        message.setf(std::ios::fixed, std::ios::floatfield);
+        message << "[Stats] FPS: " << std::setprecision(1) << fps;
+        message << " | frame: " << std::setprecision(2) << frameTimeMs << " ms";
+        message << " | avg: " << std::setprecision(2) << avgFrameMs << " ms";
+
+        std::cout << message.str() << std::endl;
+
+        statsAccumulatedFrameTimeMs = 0.0f;
+        statsFrameCounter = 0;
+        lastStatsPrintTime = now;
+    }
+
+    void openBenchmarkLog()
+    {
+        benchmarkCsvHeaderWritten = false;
+
+        if (!config.benchmark.enabled || config.benchmark.csvPath.empty())
+        {
+            return;
+        }
+
+        std::filesystem::path csvPath(config.benchmark.csvPath);
+        if (!csvPath.parent_path().empty())
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(csvPath.parent_path(), ec);
+        }
+
+        benchmarkCsvStream.open(csvPath, std::ios::out | std::ios::trunc);
+        if (!benchmarkCsvStream.is_open())
+        {
+            throw std::runtime_error("failed to open benchmark CSV file: " + csvPath.string());
+        }
+
+        benchmarkCsvStream << "frame,cpu_ms,gpu_ms\n";
+        benchmarkCsvHeaderWritten = true;
+    }
+
+    float advanceSimulationTime(float frameTimeMs)
+    {
+        double deltaSeconds = static_cast<double>(frameTimeMs) * 0.001;
+        if (config.benchmark.enabled && config.benchmark.fixedTimeStepMs > 0.0)
+        {
+            deltaSeconds = config.benchmark.fixedTimeStepMs * 0.001;
+        }
+
+        benchmarkSimulationTimeSeconds += deltaSeconds;
+        return static_cast<float>(benchmarkSimulationTimeSeconds);
+    }
+
+    void recordBenchmarkSample(float cpuMs, const std::optional<float> &gpuMs)
+    {
+        if (!config.benchmark.enabled)
+        {
+            return;
+        }
+
+        if (benchmarkSubmittedFrames <= config.benchmark.warmupFrames)
+        {
+            return;
+        }
+
+        benchmarkCpuFrameTimes.push_back(cpuMs);
+        if (gpuMs.has_value())
+        {
+            benchmarkGpuFrameTimes.push_back(gpuMs.value());
+        }
+
+        if (benchmarkCsvStream.is_open())
+        {
+            const uint64_t frameNumber = static_cast<uint64_t>(benchmarkCpuFrameTimes.size());
+            benchmarkCsvStream << frameNumber << "," << cpuMs << ",";
+            if (gpuMs.has_value())
+            {
+                benchmarkCsvStream << gpuMs.value();
+            }
+            benchmarkCsvStream << "\n";
+        }
+    }
+
+    bool shouldTerminateBenchmark() const
+    {
+        if (!config.benchmark.enabled)
+        {
+            return false;
+        }
+
+        const uint64_t measuredFrames = benchmarkSubmittedFrames > config.benchmark.warmupFrames
+                                            ? benchmarkSubmittedFrames - config.benchmark.warmupFrames
+                                            : 0;
+
+        const bool frameLimitReached = config.benchmark.frameLimit > 0 && measuredFrames >= config.benchmark.frameLimit;
+        const bool durationReached = config.benchmark.durationSeconds > 0.0 && benchmarkMeasuredSeconds >= config.benchmark.durationSeconds;
+
+        return frameLimitReached || durationReached;
+    }
+
+    struct FrameSummary
+    {
+        float minMs = 0.0f;
+        float maxMs = 0.0f;
+        float avgMs = 0.0f;
+        float p50Ms = 0.0f;
+        float p95Ms = 0.0f;
+        float p99Ms = 0.0f;
+    };
+
+    static float computePercentile(const std::vector<float> &data, double percentile)
+    {
+        if (data.empty())
+        {
+            return 0.0f;
+        }
+
+        std::vector<float> sorted = data;
+        std::sort(sorted.begin(), sorted.end());
+        const double position = percentile * static_cast<double>(sorted.size() - 1);
+        const size_t lowerIndex = static_cast<size_t>(std::floor(position));
+        const size_t upperIndex = static_cast<size_t>(std::ceil(position));
+
+        if (lowerIndex == upperIndex)
+        {
+            return sorted[lowerIndex];
+        }
+
+        const float lowerValue = sorted[lowerIndex];
+        const float upperValue = sorted[upperIndex];
+        const float weight = static_cast<float>(position - static_cast<double>(lowerIndex));
+        return lowerValue + (upperValue - lowerValue) * weight;
+    }
+
+    static FrameSummary computeFrameSummary(const std::vector<float> &data)
+    {
+        FrameSummary summary{};
+        if (data.empty())
+        {
+            return summary;
+        }
+
+        summary.minMs = *std::min_element(data.begin(), data.end());
+        summary.maxMs = *std::max_element(data.begin(), data.end());
+        summary.avgMs = std::accumulate(data.begin(), data.end(), 0.0f) / static_cast<float>(data.size());
+        summary.p50Ms = computePercentile(data, 0.5);
+        summary.p95Ms = computePercentile(data, 0.95);
+        summary.p99Ms = computePercentile(data, 0.99);
+        return summary;
+    }
+
+    void printMemorySnapshot() const
+    {
+        VkPhysicalDeviceMemoryProperties memProps;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
+
+        std::cout.setf(std::ios::fixed, std::ios::floatfield);
+        std::cout << std::setprecision(2);
+        std::cout << "[Benchmark] Memory heaps:" << std::endl;
+        for (uint32_t i = 0; i < memProps.memoryHeapCount; ++i)
+        {
+            const VkMemoryHeap &heap = memProps.memoryHeaps[i];
+            const double sizeMB = static_cast<double>(heap.size) / (1024.0 * 1024.0);
+            std::cout << "             heap " << i << ": " << sizeMB << " MB";
+            if (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            {
+                std::cout << " (device local)";
+            }
+            if (heap.flags & VK_MEMORY_HEAP_MULTI_INSTANCE_BIT)
+            {
+                std::cout << " (multi-instance)";
+            }
+            std::cout << std::endl;
+        }
+    }
+
+    void finalizeBenchmark()
+    {
+        if (benchmarkCsvStream.is_open())
+        {
+            benchmarkCsvStream.flush();
+            benchmarkCsvStream.close();
+        }
+
+        if (!config.benchmark.enabled)
+        {
+            return;
+        }
+
+        const uint64_t measuredFrames = static_cast<uint64_t>(benchmarkCpuFrameTimes.size());
+        if (measuredFrames == 0)
+        {
+            std::cout << "[Benchmark] No frames recorded (warmup frames: " << config.benchmark.warmupFrames << ")." << std::endl;
+            return;
+        }
+
+        const FrameSummary cpuSummary = computeFrameSummary(benchmarkCpuFrameTimes);
+
+        std::cout.setf(std::ios::fixed, std::ios::floatfield);
+        std::cout << std::setprecision(2);
+        std::cout << "[Benchmark] CPU frame time stats (ms) | frames: " << measuredFrames
+                  << " | duration: " << benchmarkMeasuredSeconds << " s"
+                  << " | FPS(avg): " << (cpuSummary.avgMs > 0.0f ? 1000.0f / cpuSummary.avgMs : 0.0f) << std::endl;
+        std::cout << "             min " << cpuSummary.minMs
+                  << " | avg " << cpuSummary.avgMs
+                  << " | max " << cpuSummary.maxMs
+                  << " | p50 " << cpuSummary.p50Ms
+                  << " | p95 " << cpuSummary.p95Ms
+                  << " | p99 " << cpuSummary.p99Ms << std::endl;
+
+        if (!benchmarkGpuFrameTimes.empty())
+        {
+            const FrameSummary gpuSummary = computeFrameSummary(benchmarkGpuFrameTimes);
+            std::cout << "[Benchmark] GPU frame time stats (ms)"
+                      << " | min " << gpuSummary.minMs
+                      << " | avg " << gpuSummary.avgMs
+                      << " | max " << gpuSummary.maxMs
+                      << " | p50 " << gpuSummary.p50Ms
+                      << " | p95 " << gpuSummary.p95Ms
+                      << " | p99 " << gpuSummary.p99Ms << std::endl;
+        }
+        else if (gpuTimestampsSupported)
+        {
+            std::cout << "[Benchmark] GPU timestamps unavailable for this run." << std::endl;
+        }
+
+        if (!config.benchmark.csvPath.empty())
+        {
+            std::cout << "[Benchmark] CSV written to: " << std::filesystem::absolute(config.benchmark.csvPath) << std::endl;
+        }
+
+        printMemorySnapshot();
     }
 
     // Helper function to create the Vulkan instance
@@ -339,6 +909,11 @@ private:
             if (isDeviceSuitable(device))
             {
                 physicalDevice = device;
+                vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
+                timestampPeriodNs = physicalDeviceProperties.limits.timestampPeriod;
+                gpuTimestampsSupported = physicalDeviceProperties.limits.timestampPeriod > 0.0f &&
+                                          VK_VERSION_MAJOR(physicalDeviceProperties.apiVersion) >= 1 &&
+                                          VK_VERSION_MINOR(physicalDeviceProperties.apiVersion) >= 1;
                 break;
             }
         }
@@ -529,6 +1104,26 @@ private:
         }
     }
 
+    void createDescriptorSetLayout()
+    {
+        VkDescriptorSetLayoutBinding overlayLayoutBinding{};
+        overlayLayoutBinding.binding = 0;
+        overlayLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        overlayLayoutBinding.descriptorCount = 1;
+        overlayLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        overlayLayoutBinding.pImmutableSamplers = nullptr;
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = 1;
+        layoutInfo.pBindings = &overlayLayoutBinding;
+
+        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS)
+        {
+            throw std::runtime_error("failed to create descriptor set layout!");
+        }
+    }
+
     // Create the graphics pipeline that handles vertex and fragment shaders
     void createGraphicsPipeline()
     {
@@ -608,10 +1203,12 @@ private:
         VkPushConstantRange pushConstantRange = {
             .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
             .offset = 0,
-            .size = 20};
+            .size = static_cast<uint32_t>(sizeof(float) * 5)};
 
         VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &descriptorSetLayout,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges = &pushConstantRange};
 
@@ -704,8 +1301,168 @@ private:
         }
     }
 
+    void createTimestampQueryPool()
+    {
+        if (!config.benchmark.enabled || !gpuTimestampsSupported)
+        {
+            return;
+        }
+
+        VkQueryPoolCreateInfo queryPoolInfo{};
+        queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        queryPoolInfo.queryCount = MAX_FRAMES_IN_FLIGHT * 2;
+
+        if (vkCreateQueryPool(device, &queryPoolInfo, nullptr, &timestampQueryPool) != VK_SUCCESS)
+        {
+            gpuTimestampsSupported = false;
+            timestampQueryPool = VK_NULL_HANDLE;
+        }
+    }
+
+    void createOverlayUniformBuffers()
+    {
+        const VkDeviceSize bufferSize = sizeof(OverlayUniformData);
+
+        overlayUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        overlayUniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+        overlayUniformMappedMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+        {
+            createBuffer(bufferSize,
+                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         overlayUniformBuffers[i],
+                         overlayUniformBuffersMemory[i]);
+
+            if (vkMapMemory(device, overlayUniformBuffersMemory[i], 0, bufferSize, 0, &overlayUniformMappedMemory[i]) != VK_SUCCESS)
+            {
+                throw std::runtime_error("failed to map overlay uniform buffer memory!");
+            }
+
+            std::memset(overlayUniformMappedMemory[i], 0, static_cast<size_t>(bufferSize));
+        }
+    }
+
+    void createDescriptorPool()
+    {
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS)
+        {
+            throw std::runtime_error("failed to create descriptor pool!");
+        }
+    }
+
+    void createDescriptorSets()
+    {
+        std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
+
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        allocInfo.pSetLayouts = layouts.data();
+
+        descriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+        if (vkAllocateDescriptorSets(device, &allocInfo, descriptorSets.data()) != VK_SUCCESS)
+        {
+            throw std::runtime_error("failed to allocate descriptor sets!");
+        }
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+        {
+            VkDescriptorBufferInfo bufferInfo{};
+            bufferInfo.buffer = overlayUniformBuffers[i];
+            bufferInfo.offset = 0;
+            bufferInfo.range = sizeof(OverlayUniformData);
+
+            VkWriteDescriptorSet descriptorWrite{};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = descriptorSets[i];
+            descriptorWrite.dstBinding = 0;
+            descriptorWrite.dstArrayElement = 0;
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrite.descriptorCount = 1;
+            descriptorWrite.pBufferInfo = &bufferInfo;
+
+            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        }
+    }
+
+    void updateOverlayUniformBuffer(uint32_t frameIndex)
+    {
+        overlayUniformData.metrics = glm::vec4(currentFPS, averageFPS, currentFrameTimeMs, averageFrameTimeMs);
+
+        for (size_t i = 0; i < HISTOGRAM_BIN_COUNT; ++i)
+        {
+            overlayUniformData.histogram[i] = glm::vec4(frameTimeHistogram[i], 0.0f, 0.0f, 0.0f);
+        }
+
+        overlayUniformData.histogramInfo = glm::vec4(histogramMaxFrameTimeMs, static_cast<float>(HISTOGRAM_BIN_COUNT), 0.0f, 0.0f);
+
+        std::memcpy(overlayUniformMappedMemory[frameIndex], &overlayUniformData, sizeof(OverlayUniformData));
+    }
+
+    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer &buffer, VkDeviceMemory &bufferMemory)
+    {
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = size;
+        bufferInfo.usage = usage;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS)
+        {
+            throw std::runtime_error("failed to create buffer!");
+        }
+
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS)
+        {
+            throw std::runtime_error("failed to allocate buffer memory!");
+        }
+
+        if (vkBindBufferMemory(device, buffer, bufferMemory, 0) != VK_SUCCESS)
+        {
+            throw std::runtime_error("failed to bind buffer memory!");
+        }
+    }
+
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
+    {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++)
+        {
+            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties)
+            {
+                return i;
+            }
+        }
+
+        throw std::runtime_error("failed to find suitable memory type!");
+    }
+
     // Record a command buffer for a frame
-    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
+    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, uint32_t frameIndex, float simulationTimeSeconds, double cursorX, double cursorY)
     {
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -713,6 +1470,12 @@ private:
         if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
         {
             throw std::runtime_error("failed to begin recording command buffer!");
+        }
+
+        if (gpuTimestampsSupported && timestampQueryPool != VK_NULL_HANDLE)
+        {
+            vkCmdResetQueryPool(commandBuffer, timestampQueryPool, frameIndex * 2, 2);
+            vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueryPool, frameIndex * 2);
         }
 
         VkRenderPassBeginInfo renderPassInfo{};
@@ -728,6 +1491,7 @@ private:
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[frameIndex], 0, nullptr);
 
         VkViewport viewport{};
         viewport.x = 0.0f;
@@ -743,18 +1507,21 @@ private:
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        double xpos, ypos;
-        glfwGetCursorPos(window, &xpos, &ypos);
-
         float fragmentConstants[5] = {
             (float)viewport.width,
             (float)viewport.height,
-            (float)xpos,
-            (float)ypos,
-            (float)glfwGetTime()};
+            static_cast<float>(cursorX),
+            static_cast<float>(cursorY),
+            simulationTimeSeconds};
 
         vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(fragmentConstants), fragmentConstants);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+        if (gpuTimestampsSupported && timestampQueryPool != VK_NULL_HANDLE)
+        {
+            vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampQueryPool, frameIndex * 2 + 1);
+        }
+
         vkCmdEndRenderPass(commandBuffer);
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
@@ -791,6 +1558,23 @@ private:
     // Draw a frame using the command buffer
     void drawFrame()
     {
+        const auto currentTimestamp = std::chrono::steady_clock::now();
+        const float frameTimeMs = std::chrono::duration<float, std::milli>(currentTimestamp - lastFrameTimestamp).count();
+        lastFrameTimestamp = currentTimestamp;
+        updateFrameStats(frameTimeMs);
+
+        if (config.benchmark.enabled)
+        {
+            benchmarkElapsedSeconds += static_cast<double>(frameTimeMs) * 0.001;
+            benchmarkSubmittedFrames++;
+            if (benchmarkSubmittedFrames > config.benchmark.warmupFrames)
+            {
+                benchmarkMeasuredSeconds += static_cast<double>(frameTimeMs) * 0.001;
+            }
+        }
+
+        float simulationTimeSeconds = advanceSimulationTime(frameTimeMs);
+
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         uint32_t imageIndex;
@@ -807,8 +1591,20 @@ private:
         }
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
+        if (!config.benchmark.enabled || config.enableOverlay)
+        {
+            updateOverlayUniformBuffer(currentFrame);
+        }
         vkResetCommandBuffer(commandBuffers[currentFrame], 0);
-        recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
+
+        double cursorX = 0.0;
+        double cursorY = 0.0;
+        if (!config.benchmark.enabled || !config.benchmark.headless)
+        {
+            glfwGetCursorPos(window, &cursorX, &cursorY);
+        }
+
+        recordCommandBuffer(commandBuffers[currentFrame], imageIndex, currentFrame, simulationTimeSeconds, cursorX, cursorY);
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -851,6 +1647,32 @@ private:
             throw std::runtime_error("failed to present swap chain image!");
         }
 
+        float gpuFrameMs = std::numeric_limits<float>::quiet_NaN();
+        bool gpuTimingAvailable = false;
+        if (gpuTimestampsSupported && timestampQueryPool != VK_NULL_HANDLE)
+        {
+            uint64_t timestamps[2] = {};
+            VkResult queryResult = vkGetQueryPoolResults(device,
+                                                         timestampQueryPool,
+                                                         currentFrame * 2,
+                                                         2,
+                                                         sizeof(timestamps),
+                                                         timestamps,
+                                                         sizeof(uint64_t),
+                                                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+            if (queryResult == VK_SUCCESS)
+            {
+                uint64_t delta = timestamps[1] - timestamps[0];
+                if (timestampPeriodNs > 0.0f)
+                {
+                    gpuFrameMs = static_cast<float>((static_cast<double>(delta) * static_cast<double>(timestampPeriodNs)) * 1e-6);
+                    gpuTimingAvailable = true;
+                }
+            }
+        }
+
+        recordBenchmarkSample(frameTimeMs, gpuTimingAvailable ? std::optional<float>(gpuFrameMs) : std::optional<float>{});
+
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
@@ -888,6 +1710,19 @@ private:
     // Choose the best presentation mode from available modes
     VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR> &availablePresentModes)
     {
+        bool requestVSync = config.benchmark.enabled ? config.benchmark.enableVSync : config.enableVSync;
+
+        if (!requestVSync)
+        {
+            for (const auto &availablePresentMode : availablePresentModes)
+            {
+                if (availablePresentMode == VK_PRESENT_MODE_IMMEDIATE_KHR)
+                {
+                    return availablePresentMode;
+                }
+            }
+        }
+
         for (const auto &availablePresentMode : availablePresentModes)
         {
             if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR)
@@ -1106,9 +1941,163 @@ private:
     }
 };
 
-int main()
+int main(int argc, char **argv)
 {
-    VulkanEngine app;
+    EngineConfig config;
+    config.enableVSync = true;
+    config.benchmark.enableVSync = true;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string arg(argv[i]);
+
+        if (arg == "-h" || arg == "--help")
+        {
+            printUsage();
+            return EXIT_SUCCESS;
+        }
+        else if (arg == "--benchmark")
+        {
+            config.benchmark.enabled = true;
+        }
+        else if (arg == "--benchmark-headless")
+        {
+            config.benchmark.enabled = true;
+            config.benchmark.headless = true;
+        }
+        else if (arg == "--benchmark-no-vsync")
+        {
+            config.benchmark.enabled = true;
+            config.benchmark.enableVSync = false;
+        }
+        else if (arg == "--benchmark-vsync")
+        {
+            config.benchmark.enabled = true;
+            config.benchmark.enableVSync = true;
+        }
+        else if (arg == "--vsync")
+        {
+            config.enableVSync = true;
+            config.benchmark.enableVSync = true;
+        }
+        else if (arg == "--no-vsync")
+        {
+            config.enableVSync = false;
+            config.benchmark.enableVSync = false;
+        }
+        else if (arg == "--fullscreen")
+        {
+            config.fullscreen = true;
+        }
+        else if (startsWith(arg, "--window-width="))
+        {
+            uint32_t value = 0;
+            if (!parseUint32(arg.substr(std::string("--window-width=").size()), value))
+            {
+                std::cerr << "Invalid value for --window-width: " << arg << std::endl;
+                return EXIT_FAILURE;
+            }
+            config.windowWidth = value;
+            config.benchmark.windowWidth = value;
+        }
+        else if (startsWith(arg, "--window-height="))
+        {
+            uint32_t value = 0;
+            if (!parseUint32(arg.substr(std::string("--window-height=").size()), value))
+            {
+                std::cerr << "Invalid value for --window-height: " << arg << std::endl;
+                return EXIT_FAILURE;
+            }
+            config.windowHeight = value;
+            config.benchmark.windowHeight = value;
+        }
+        else if (startsWith(arg, "--benchmark-width="))
+        {
+            config.benchmark.enabled = true;
+            uint32_t value = 0;
+            if (!parseUint32(arg.substr(std::string("--benchmark-width=").size()), value))
+            {
+                std::cerr << "Invalid value for --benchmark-width: " << arg << std::endl;
+                return EXIT_FAILURE;
+            }
+            config.benchmark.windowWidth = value;
+        }
+        else if (startsWith(arg, "--benchmark-height="))
+        {
+            config.benchmark.enabled = true;
+            uint32_t value = 0;
+            if (!parseUint32(arg.substr(std::string("--benchmark-height=").size()), value))
+            {
+                std::cerr << "Invalid value for --benchmark-height: " << arg << std::endl;
+                return EXIT_FAILURE;
+            }
+            config.benchmark.windowHeight = value;
+        }
+        else if (startsWith(arg, "--benchmark-seconds="))
+        {
+            config.benchmark.enabled = true;
+            double value = 0.0;
+            if (!parseDouble(arg.substr(std::string("--benchmark-seconds=").size()), value) || value < 0.0)
+            {
+                std::cerr << "Invalid value for --benchmark-seconds: " << arg << std::endl;
+                return EXIT_FAILURE;
+            }
+            config.benchmark.durationSeconds = value;
+        }
+        else if (startsWith(arg, "--benchmark-frames="))
+        {
+            config.benchmark.enabled = true;
+            uint64_t value = 0;
+            if (!parseUint64(arg.substr(std::string("--benchmark-frames=").size()), value))
+            {
+                std::cerr << "Invalid value for --benchmark-frames: " << arg << std::endl;
+                return EXIT_FAILURE;
+            }
+            config.benchmark.frameLimit = value;
+        }
+        else if (startsWith(arg, "--benchmark-warmup="))
+        {
+            config.benchmark.enabled = true;
+            uint32_t value = 0;
+            if (!parseUint32(arg.substr(std::string("--benchmark-warmup=").size()), value))
+            {
+                std::cerr << "Invalid value for --benchmark-warmup: " << arg << std::endl;
+                return EXIT_FAILURE;
+            }
+            config.benchmark.warmupFrames = value;
+        }
+        else if (startsWith(arg, "--benchmark-fixed-delta="))
+        {
+            config.benchmark.enabled = true;
+            double value = 0.0;
+            if (!parseDouble(arg.substr(std::string("--benchmark-fixed-delta=").size()), value) || value <= 0.0)
+            {
+                std::cerr << "Invalid value for --benchmark-fixed-delta: " << arg << std::endl;
+                return EXIT_FAILURE;
+            }
+            config.benchmark.fixedTimeStepMs = value;
+        }
+        else if (startsWith(arg, "--benchmark-csv="))
+        {
+            config.benchmark.enabled = true;
+            config.benchmark.csvPath = arg.substr(std::string("--benchmark-csv=").size());
+        }
+        else
+        {
+            std::cerr << "Unknown option: " << arg << std::endl;
+            printUsage();
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (config.benchmark.enabled)
+    {
+        config.enableVSync = config.benchmark.enableVSync;
+        config.windowWidth = config.benchmark.windowWidth;
+        config.windowHeight = config.benchmark.windowHeight;
+    }
+
+    VulkanEngine app(config);
 
     try
     {

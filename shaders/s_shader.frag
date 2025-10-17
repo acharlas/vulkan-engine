@@ -1,6 +1,7 @@
 #version 450
 #extension GL_ARB_separate_shader_objects : enable
 
+
 layout(location = 0) out vec4 outColor;
 
 layout(push_constant) uniform FSConst {
@@ -8,193 +9,159 @@ layout(push_constant) uniform FSConst {
     vec2 mouse;
     float time;
 } u_input;
+#include "overlay_debug.glsl"
+
+float iTime = u_input.time;
+vec2 iResolution = u_input.resolution;
+vec2 iMouse = u_input.mouse;
 
 
-const int NUM_STEPS = 8;
-const float PI	 	= 3.141592;
-const float EPSILON	= 1e-3;
-#define EPSILON_NRM (0.1 / u_input.resolution.x)
-//#define AA
+// Protean clouds by nimitz (twitter: @stormoid)
+// https://www.shadertoy.com/view/3l23Rh
+// License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License
+// Contact the author for other licensing options
 
-// sea
-const int ITER_GEOMETRY = 3;
-const int ITER_FRAGMENT = 5;
-const float SEA_HEIGHT = 0.6;
-const float SEA_CHOPPY = 4.0;
-const float SEA_SPEED = 0.8;
-const float SEA_FREQ = 0.16;
-const vec3 SEA_BASE = vec3(0.0,0.09,0.18);
-const vec3 SEA_WATER_COLOR = vec3(0.8,0.9,0.6)*0.6;
-#define SEA_TIME (1.0 + u_input.time * SEA_SPEED)
-const mat2 octave_m = mat2(1.6,1.2,-1.2,1.6);
+/*
+	Technical details:
 
-// math
-mat3 fromEuler(vec3 ang) {
-	vec2 a1 = vec2(sin(ang.x),cos(ang.x));
-    vec2 a2 = vec2(sin(ang.y),cos(ang.y));
-    vec2 a3 = vec2(sin(ang.z),cos(ang.z));
-    mat3 m;
-    m[0] = vec3(a1.y*a3.y+a1.x*a2.x*a3.x,a1.y*a2.x*a3.x+a3.y*a1.x,-a2.y*a3.x);
-	m[1] = vec3(-a2.y*a1.x,a1.y*a2.y,a2.x);
-	m[2] = vec3(a3.y*a1.x*a2.x+a1.y*a3.x,a1.x*a3.x-a1.y*a3.y*a2.x,a2.y*a3.y);
-	return m;
-}
-float hash( vec2 p ) {
-	float h = dot(p,vec2(127.1,311.7));	
-    return fract(sin(h)*43758.5453123);
-}
-float noise( in vec2 p ) {
-    vec2 i = floor( p );
-    vec2 f = fract( p );	
-	vec2 u = f*f*(3.0-2.0*f);
-    return -1.0+2.0*mix( mix( hash( i + vec2(0.0,0.0) ), 
-                     hash( i + vec2(1.0,0.0) ), u.x),
-                mix( hash( i + vec2(0.0,1.0) ), 
-                     hash( i + vec2(1.0,1.0) ), u.x), u.y);
-}
+	The main volume noise is generated from a deformed periodic grid, which can produce
+	a large range of noise-like patterns at very cheap evalutation cost. Allowing for multiple
+	fetches of volume gradient computation for improved lighting.
 
-// lighting
-float diffuse(vec3 n,vec3 l,float p) {
-    return pow(dot(n,l) * 0.4 + 0.6,p);
-}
-float specular(vec3 n,vec3 l,vec3 e,float s) {    
-    float nrm = (s + 8.0) / (PI * 8.0);
-    return pow(max(dot(reflect(e,n),l),0.0),s) * nrm;
-}
+	To further accelerate marching, since the volume is smooth, more than half the the density
+	information isn't used to rendering or shading but only as an underlying volume	distance to 
+	determine dynamic step size, by carefully selecting an equation	(polynomial for speed) to 
+	step as a function of overall density (not necessarily rendered) the visual results can be 
+	the	same as a naive implementation with ~40% increase in rendering performance.
 
-// sky
-vec3 getSkyColor(vec3 e) {
-    e.y = (max(e.y,0.0)*0.8+0.2)*0.8;
-    return vec3(pow(1.0-e.y,2.0), 1.0-e.y, 0.6+(1.0-e.y)*0.4) * 1.1;
-}
+	Since the dynamic marching step size is even less uniform due to steps not being rendered at all
+	the fog is evaluated as the difference of the fog integral at each rendered step.
 
-// sea
-float sea_octave(vec2 uv, float choppy) {
-    uv += noise(uv);        
-    vec2 wv = 1.0-abs(sin(uv));
-    vec2 swv = abs(cos(uv));    
-    wv = mix(wv,swv,wv);
-    return pow(1.0-pow(wv.x * wv.y,0.65),choppy);
-}
+*/
 
-float map(vec3 p) {
-    float freq = SEA_FREQ;
-    float amp = SEA_HEIGHT;
-    float choppy = SEA_CHOPPY;
-    vec2 uv = p.xz; uv.x *= 0.75;
-    
-    float d, h = 0.0;    
-    for(int i = 0; i < ITER_GEOMETRY; i++) {        
-    	d = sea_octave((uv+SEA_TIME)*freq,choppy);
-    	d += sea_octave((uv-SEA_TIME)*freq,choppy);
-        h += d * amp;        
-    	uv *= octave_m; freq *= 1.9; amp *= 0.22;
-        choppy = mix(choppy,1.0,0.2);
+mat2 rot(in float a){float c = cos(a), s = sin(a);return mat2(c,s,-s,c);}
+const mat3 m3 = mat3(0.33338, 0.56034, -0.71817, -0.87887, 0.32651, -0.15323, 0.15162, 0.69596, 0.61339)*1.93;
+float mag2(vec2 p){return dot(p,p);}
+float linstep(in float mn, in float mx, in float x){ return clamp((x - mn)/(mx - mn), 0., 1.); }
+float prm1 = 0.;
+vec2 bsMo = vec2(0);
+
+vec2 disp(float t){ return vec2(sin(t*0.22)*1., cos(t*0.175)*1.)*2.; }
+
+vec2 map(vec3 p)
+{
+    vec3 p2 = p;
+    p2.xy -= disp(p.z).xy;
+    p.xy *= rot(sin(p.z+iTime)*(0.1 + prm1*0.05) + iTime*0.09);
+    float cl = mag2(p2.xy);
+    float d = 0.;
+    p *= .61;
+    float z = 1.;
+    float trk = 1.;
+    float dspAmp = 0.1 + prm1*0.2;
+    for(int i = 0; i < 5; i++)
+    {
+		p += sin(p.zxy*0.75*trk + iTime*trk*.8)*dspAmp;
+        d -= abs(dot(cos(p), sin(p.yzx))*z);
+        z *= 0.57;
+        trk *= 1.4;
+        p = p*m3;
     }
-    return p.y - h;
+    d = abs(d + prm1*3.)+ prm1*.3 - 2.5 + bsMo.y;
+    return vec2(d + cl*.2 + 0.25, cl);
 }
 
-float map_detailed(vec3 p) {
-    float freq = SEA_FREQ;
-    float amp = SEA_HEIGHT;
-    float choppy = SEA_CHOPPY;
-    vec2 uv = p.xz; uv.x *= 0.75;
-    
-    float d, h = 0.0;    
-    for(int i = 0; i < ITER_FRAGMENT; i++) {        
-    	d = sea_octave((uv+SEA_TIME)*freq,choppy);
-    	d += sea_octave((uv-SEA_TIME)*freq,choppy);
-        h += d * amp;        
-    	uv *= octave_m; freq *= 1.9; amp *= 0.22;
-        choppy = mix(choppy,1.0,0.2);
-    }
-    return p.y - h;
-}
+vec4 render( in vec3 ro, in vec3 rd, float time )
+{
+	vec4 rez = vec4(0);
+    const float ldst = 8.;
+	vec3 lpos = vec3(disp(time + ldst)*0.5, time + ldst);
+	float t = 1.5;
+	float fogT = 0.;
+	for(int i=0; i<130; i++)
+	{
+		if(rez.a > 0.99)break;
 
-vec3 getSeaColor(vec3 p, vec3 n, vec3 l, vec3 eye, vec3 dist) {  
-    float fresnel = clamp(1.0 - dot(n,-eye), 0.0, 1.0);
-    fresnel = min(pow(fresnel,3.0), 0.5);
+		vec3 pos = ro + t*rd;
+        vec2 mpv = map(pos);
+		float den = clamp(mpv.x-0.3,0.,1.)*1.12;
+		float dn = clamp((mpv.x + 2.),0.,3.);
         
-    vec3 reflected = getSkyColor(reflect(eye,n));    
-    vec3 refracted = SEA_BASE + diffuse(n,l,80.0) * SEA_WATER_COLOR * 0.12; 
-    
-    vec3 color = mix(refracted,reflected,fresnel);
-    
-    float atten = max(1.0 - dot(dist,dist) * 0.001, 0.0);
-    color += SEA_WATER_COLOR * (p.y - SEA_HEIGHT) * 0.18 * atten;
-    
-    color += vec3(specular(n,l,eye,60.0));
-    
-    return color;
-}
-
-// tracing
-vec3 getNormal(vec3 p, float eps) {
-    vec3 n;
-    n.y = map_detailed(p);    
-    n.x = map_detailed(vec3(p.x+eps,p.y,p.z)) - n.y;
-    n.z = map_detailed(vec3(p.x,p.y,p.z+eps)) - n.y;
-    n.y = eps;
-    return normalize(n);
-}
-
-float heightMapTracing(vec3 ori, vec3 dir, out vec3 p) {  
-    float tm = 0.0;
-    float tx = 1000.0;    
-    float hx = map(ori + dir * tx);
-    if(hx > 0.0) {
-        p = ori + dir * tx;
-        return tx;   
-    }
-    float hm = map(ori + dir * tm);    
-    float tmid = 0.0;
-    for(int i = 0; i < NUM_STEPS; i++) {
-        tmid = mix(tm,tx, hm/(hm-hx));                   
-        p = ori + dir * tmid;                   
-    	float hmid = map(p);
-		if(hmid < 0.0) {
-        	tx = tmid;
-            hx = hmid;
-        } else {
-            tm = tmid;
-            hm = hmid;
+		vec4 col = vec4(0);
+        if (mpv.x > 0.6)
+        {
+        
+            col = vec4(sin(vec3(5.,0.4,0.2) + mpv.y*0.1 +sin(pos.z*0.4)*0.5 + 1.8)*0.5 + 0.5,0.08);
+            col *= den*den*den;
+			col.rgb *= linstep(4.,-2.5, mpv.x)*2.3;
+            float dif =  clamp((den - map(pos+.8).x)/9., 0.001, 1. );
+            dif += clamp((den - map(pos+.35).x)/2.5, 0.001, 1. );
+            col.xyz *= den*(vec3(0.005,.045,.075) + 1.5*vec3(0.033,0.07,0.03)*dif);
         }
-    }
-    return tmid;
+		
+		float fogC = exp(t*0.2 - 2.2);
+		col.rgba += vec4(0.06,0.11,0.11, 0.1)*clamp(fogC-fogT, 0., 1.);
+		fogT = fogC;
+		rez = rez + col*(1. - rez.a);
+		t += clamp(0.5 - dn*dn*.05, 0.09, 0.3);
+	}
+	return clamp(rez, 0.0, 1.0);
 }
 
-vec3 ft_getPixel(in vec2 coord, float time) {    
-    vec2 uv = coord / u_input.resolution.xy;
-    uv = uv * 2.0 - 1.0;
-    uv.y = -uv.y;
-    uv.x *= u_input.resolution.x / u_input.resolution.y;    
+float getsat(vec3 c)
+{
+    float mi = min(min(c.x, c.y), c.z);
+    float ma = max(max(c.x, c.y), c.z);
+    return (ma - mi)/(ma+ 1e-7);
+}
+
+//from my "Will it blend" shader (https://www.shadertoy.com/view/lsdGzN)
+	vec3 iLerp(in vec3 a, in vec3 b, in float x)
+	{
+	    vec3 ic = mix(a, b, x) + vec3(1e-6,0.,0.);
+	    float sd = abs(getsat(ic) - mix(getsat(a), getsat(b), x));
+	    vec3 dir = normalize(vec3(2.*ic.x - ic.y - ic.z, 2.*ic.y - ic.x - ic.z, 2.*ic.z - ic.y - ic.x));
+    float lgt = dot(vec3(1.0), ic);
+    float ff = dot(dir, normalize(ic));
+    ic += 1.5*dir*sd*ff*lgt;
+    return clamp(ic,0.,1.);
+}
+
+	void main(  )
+	{	
+	
+	    vec2 fragCoord = vec2(gl_FragCoord.x, iResolution.y - gl_FragCoord.y);
+		vec2 q = fragCoord/iResolution.xy;
+	    vec2 p = (fragCoord - 0.5*iResolution.xy)/iResolution.y;
+	    bsMo = vec2(0);//(iMouse.xy - 0.5*iResolution.xy)/iResolution.y;
+	    
+	    float time = iTime*3.;
+	    vec3 ro = vec3(0,0,time);
+    
+    ro += vec3(sin(iTime)*0.5,sin(iTime*1.)*1.,0);
         
-    // ray
-    vec3 ang = vec3(sin(time*3.0)*0.1,sin(time)*0.2+0.3,time);    
-    vec3 ori = vec3(0.0,3.5,time*5.0);
-    vec3 dir = normalize(vec3(uv.xy,-2.0)); dir.z += length(uv) * 0.14;
-    dir = normalize(dir) * fromEuler(ang);
+    float dspAmp = .85;
+    ro.xy += disp(ro.z)*dspAmp;
+    float tgtDst = 3.5;
     
-    // tracing
-    vec3 p;
-    heightMapTracing(ori,dir,p);
-    vec3 dist = p - ori;
-    vec3 n = getNormal(p, dot(dist,dist) * EPSILON_NRM);
-    vec3 light = normalize(vec3(0.0,1.0,0.8)); 
-             
-    // color
-    return mix(
-        getSkyColor(dir),
-        getSeaColor(p,n,light,dir,dist),
-    	pow(smoothstep(0.0,-0.02,dir.y),0.2));
-}
+    vec3 target = normalize(ro - vec3(disp(time + tgtDst)*dspAmp, time + tgtDst));
+    ro.x -= bsMo.x*2.;
+    vec3 rightdir = normalize(cross(target, vec3(0,1,0)));
+    vec3 updir = normalize(cross(rightdir, target));
+    rightdir = normalize(cross(updir, target));
+	vec3 rd=normalize((p.x*rightdir + p.y*updir)*1. - target);
+    rd.xy *= rot(-disp(time + 3.5).x*0.2 + bsMo.x);
+    prm1 = smoothstep(-0.4, 0.4,sin(iTime*.3));
+	vec4 scn = render(ro, rd, time);
+		
+    vec3 col = scn.rgb;
+    col = iLerp(col.bgr, col.rgb, clamp(1.-prm1,0.05,1.));
 
-// main
-void main( ) {
-    float time = u_input.time * 0.8;
-    vec3 color = ft_getPixel(gl_FragCoord.xy, time);
+	    col = pow(col, vec3(.55,0.90,0.6))*vec3(1.,.97,.9);
 
-    
-    // post
-	outColor = vec4(pow(color,vec3(1.6)), 1.0);
-}
+	    col *= pow( 16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y), 0.12)*0.7+0.3; //Vign
+
+	    col = applyOverlay(col, fragCoord, iResolution);
+	    
+		outColor = vec4( col, 1.0 );
+	}
